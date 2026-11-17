@@ -531,7 +531,7 @@ def validate_caption_theme(theme):
         size=float(merged['font_size']);stroke=float(merged['stroke_width'])
         opacity=float(merged['opacity']);position=float(merged['position'])
     except (KeyError,ValueError,TypeError):raise HTTPException(400,'Invalid subtitle style values')
-    if not all(math.isfinite(n) for n in (size,stroke,opacity,position)) or not (16<=size<=100 and 0<=stroke<=8 and 10<=opacity<=100 and 5<=position<=45):
+    if not all(math.isfinite(n) for n in (size,stroke,opacity,position)) or not (16<=size<=100 and 0<=stroke<=8 and 0<=opacity<=100 and 5<=position<=45):
         raise HTTPException(400,'Subtitle style settings are out of range')
     colors={}
     for k in ('color','stroke_color'):
