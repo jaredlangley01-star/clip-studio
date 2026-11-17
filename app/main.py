@@ -1,6 +1,6 @@
 import os, re, json, time, uuid, sqlite3, secrets, subprocess, threading, math, shutil, urllib.request, queue, hashlib
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlsplit, urlencode
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -59,6 +59,8 @@ def init():
         cols_platform=[r[1] for r in c.execute('PRAGMA table_info(platform_accounts)')]
         if 'scopes' not in cols_platform:c.execute("ALTER TABLE platform_accounts ADD COLUMN scopes TEXT DEFAULT ''")
         c.execute('CREATE TABLE IF NOT EXISTS twitch_watchlist(broadcaster_id TEXT PRIMARY KEY,login TEXT NOT NULL,display_name TEXT NOT NULL,thumbnail TEXT,added_at TEXT NOT NULL)')
+        c.execute("CREATE TABLE IF NOT EXISTS twitch_monitor_sessions(broadcaster_id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,stream_started_at TEXT,last_checked_at TEXT,last_live INTEGER DEFAULT 0,last_error TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS twitch_highlight_signals(clip_id TEXT PRIMARY KEY,broadcaster_id TEXT NOT NULL,title TEXT,clip_url TEXT,thumbnail TEXT,created_at TEXT,views INTEGER NOT NULL DEFAULT 0,score INTEGER NOT NULL DEFAULT 0,reason TEXT NOT NULL,review_status TEXT NOT NULL DEFAULT 'candidate',discovered_at TEXT NOT NULL,updated_at TEXT NOT NULL)")
         c.execute('CREATE TABLE IF NOT EXISTS twitch_created_clips(id TEXT PRIMARY KEY,broadcaster_id TEXT NOT NULL,edit_url TEXT,created_at TEXT NOT NULL)')
         c.execute('CREATE TABLE IF NOT EXISTS oauth_pending(state TEXT PRIMARY KEY,platform TEXT NOT NULL,expires_at REAL NOT NULL)')
         c.execute("CREATE TABLE IF NOT EXISTS ingest_items(platform TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT NOT NULL,item_type TEXT NOT NULL,source_url TEXT,published TEXT,thumbnail TEXT,status TEXT NOT NULL DEFAULT 'discovered',video_id TEXT,discovered TEXT NOT NULL,PRIMARY KEY(platform,external_id))")
@@ -579,6 +581,118 @@ def twitch_watch_add(p:WatchChannel,_:None=Depends(auth)):
 def twitch_watch_remove(broadcaster_id:str,_:None=Depends(auth)):
     execute('DELETE FROM twitch_watchlist WHERE broadcaster_id=?',(broadcaster_id,))
     return {'removed':True}
+
+
+# Twitch Live Intelligence: only official public live metadata and preexisting clips.
+# This does not capture source video, call Twitch Create Clip, or publish anything.
+class TwitchMonitorChoice(BaseModel):
+    broadcaster_id:str=Field(min_length=1,max_length=30)
+    enabled:bool
+
+def twitch_monitor_set(p:TwitchMonitorChoice,_:None=Depends(auth)):
+    if not p.broadcaster_id.isdecimal():raise HTTPException(400,'Invalid Twitch broadcaster ID')
+    if not execute('SELECT 1 FROM twitch_watchlist WHERE broadcaster_id=?',(p.broadcaster_id,)).fetchone():
+        raise HTTPException(404,'Add this broadcaster to the watchlist first')
+    now=utc()
+    execute("""INSERT INTO twitch_monitor_sessions(broadcaster_id,enabled,started_at)
+            VALUES(?,?,?) ON CONFLICT(broadcaster_id) DO UPDATE SET enabled=excluded.enabled,
+            started_at=CASE WHEN excluded.enabled=1 AND twitch_monitor_sessions.enabled=0 THEN excluded.started_at ELSE twitch_monitor_sessions.started_at END""",
+            (p.broadcaster_id,int(p.enabled),now))
+    return {'broadcaster_id':p.broadcaster_id,'enabled':p.enabled,'publishes':False,'media_capture':False}
+
+app.post('/api/twitch/monitor',dependencies=[])(twitch_monitor_set)
+
+def twitch_monitor_status(_:None=Depends(auth)):
+    return [serialize(v) for v in execute("""SELECT s.broadcaster_id,w.login,w.display_name,s.enabled,
+       s.started_at,s.stream_started_at,s.last_checked_at,s.last_live,s.last_error,
+       (SELECT COUNT(*) FROM twitch_highlight_signals c WHERE c.broadcaster_id=s.broadcaster_id AND c.review_status='candidate') AS pending
+       FROM twitch_monitor_sessions s JOIN twitch_watchlist w ON w.broadcaster_id=s.broadcaster_id
+       ORDER BY s.enabled DESC,s.started_at DESC""").fetchall()]
+
+app.get('/api/twitch/monitor')(twitch_monitor_status)
+
+def twitch_signal_score(clip, now):
+    # Ranking public community clipping activity. NOT analysis of stream audio/video.
+    views=max(0,int(clip.get('view_count') or 0))
+    age_hours=max(0.25,(now-datetime.fromisoformat(clip['created_at'].replace('Z','+00:00'))).total_seconds()/3600)
+    velocity=views/age_hours
+    score=min(99,round(12*math.log1p(views)+9*math.log1p(velocity)))
+    return score,'Public community signal: '+str(views)+' views; '+str(round(velocity,1))+' views/hour; no source-video AI analysis'
+
+def scan_twitch_monitors():
+    watches=execute('SELECT s.broadcaster_id,w.login FROM twitch_monitor_sessions s JOIN twitch_watchlist w ON w.broadcaster_id=s.broadcaster_id WHERE s.enabled=1').fetchall()
+    outcome={'scanned':0,'new':0,'errors':{},'publishes':False,'captures_media':False}
+    now=datetime.now(timezone.utc)
+    for entry in watches:
+        bid=entry['broadcaster_id']
+        try:
+            stream=twitch_helix('/streams',{'user_id':bid,'first':1})
+            active=(stream.get('data') or [None])[0]
+            stream_started=active.get('started_at') if active else None
+            # Only candidate clips from a current broadcast, not old popular all-time clips.
+            # Twitch Get Clips supports an RFC3339 window; no media is downloaded.
+            if active and stream_started:
+                begin=max(now-timedelta(hours=24),datetime.fromisoformat(stream_started.replace('Z','+00:00')))
+                params={'broadcaster_id':bid,'first':40,'started_at':begin.strftime('%Y-%m-%dT%H:%M:%SZ'),'ended_at':now.strftime('%Y-%m-%dT%H:%M:%SZ')}
+                response=twitch_helix('/clips',params)
+                for item in response.get('data',[]):
+                    cid=item.get('id')
+                    if not cid or len(cid)>180 or not item.get('created_at'):continue
+                    try:score,reason=twitch_signal_score(item,now)
+                    except (TypeError,ValueError,OverflowError):continue
+                    exists=execute('SELECT 1 FROM twitch_highlight_signals WHERE clip_id=?',(cid,)).fetchone()
+                    execute("""INSERT INTO twitch_highlight_signals(clip_id,broadcaster_id,title,clip_url,thumbnail,created_at,views,score,reason,discovered_at,updated_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(clip_id) DO UPDATE SET title=excluded.title,clip_url=excluded.clip_url,
+                        thumbnail=excluded.thumbnail,views=excluded.views,score=excluded.score,reason=excluded.reason,
+                        updated_at=excluded.updated_at""",
+                        (cid,bid,str(item.get('title') or 'Untitled')[:200],item.get('url',''),
+                        item.get('thumbnail_url',''),item['created_at'],max(0,int(item.get('view_count') or 0)),
+                        score,reason,utc(),utc()))
+                    if not exists:outcome['new']+=1
+            execute('UPDATE twitch_monitor_sessions SET last_checked_at=?,stream_started_at=?,last_live=?,last_error=NULL WHERE broadcaster_id=?',
+                (utc(),stream_started,int(bool(active)),bid))
+            outcome['scanned']+=1
+        except HTTPException as exc:
+            outcome['errors'][bid]='Twitch metadata API HTTP '+str(exc.status_code)
+            execute('UPDATE twitch_monitor_sessions SET last_checked_at=?,last_error=? WHERE broadcaster_id=?',
+                (utc(),outcome['errors'][bid],bid))
+        except Exception:
+            outcome['errors'][bid]='Unable to inspect broadcaster metadata'
+            execute('UPDATE twitch_monitor_sessions SET last_checked_at=?,last_error=? WHERE broadcaster_id=?',
+                (utc(),outcome['errors'][bid],bid))
+    return outcome
+
+@app.post('/api/twitch/monitor/scan')
+def scan_twitch_now(_:None=Depends(auth)):
+    return scan_twitch_monitors()
+
+@app.post('/api/twitch/monitor/scheduled')
+def scan_twitch_scheduled(request:Request):
+    # For a hosted cron caller; use a separate long random secret, never OAuth tokens.
+    key=os.getenv('MONITOR_SCAN_KEY','').strip()
+    provided=request.headers.get('x-clip-studio-monitor-key','')
+    if len(key)<32 or not secrets.compare_digest(key,provided):
+        raise HTTPException(403,'Scheduled monitoring is not configured or unauthorized')
+    return scan_twitch_monitors()
+
+class TwitchSignalReview(BaseModel):
+    status:str
+
+@app.get('/api/twitch/highlight-signals')
+def twitch_highlight_signals(_:None=Depends(auth)):
+    return [serialize(r) for r in execute("""SELECT c.clip_id,c.broadcaster_id,w.display_name,c.title,c.clip_url,c.thumbnail,
+        c.created_at,c.views,c.score,c.reason,c.review_status,c.discovered_at
+        FROM twitch_highlight_signals c LEFT JOIN twitch_watchlist w ON w.broadcaster_id=c.broadcaster_id
+        ORDER BY CASE c.review_status WHEN 'candidate' THEN 0 ELSE 1 END,c.score DESC,c.discovered_at DESC LIMIT 150""").fetchall()]
+
+@app.patch('/api/twitch/highlight-signals/{clip_id}')
+def twitch_highlight_review(clip_id:str,p:TwitchSignalReview,_:None=Depends(auth)):
+    if p.status not in ('candidate','saved','dismissed'):raise HTTPException(400,'Unknown review status')
+    updated=execute('UPDATE twitch_highlight_signals SET review_status=?,updated_at=? WHERE clip_id=?',
+        (p.status,utc(),clip_id)).rowcount
+    if not updated:raise HTTPException(404,'Clip suggestion not found')
+    return {'id':clip_id,'status':p.status,'published':False}
 
 @app.get('/api/twitch/broadcasters/{broadcaster_id}/clips')
 def twitch_broadcaster_clips(broadcaster_id:str,_:None=Depends(auth)):

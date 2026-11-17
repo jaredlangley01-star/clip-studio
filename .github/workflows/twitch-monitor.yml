@@ -1,0 +1,22 @@
+name: Twitch metadata monitor
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Scan public live status and existing Twitch clips
+        env:
+          MONITOR_KEY: ${{ secrets.CLIP_STUDIO_MONITOR_KEY }}
+        run: |
+          if [ -z "$MONITOR_KEY" ]; then
+            echo "CLIP_STUDIO_MONITOR_KEY is not configured. Skipping scheduled scans."
+            exit 0
+          fi
+          curl --fail --show-error --silent --retry 2 --max-time 90 \
+            --request POST \
+            --header "X-Clip-Studio-Monitor-Key: $MONITOR_KEY" \
+            "https://clip-studio-t7r6.onrender.com/api/twitch/monitor/scheduled"

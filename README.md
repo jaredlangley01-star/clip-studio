@@ -1,3 +1,23 @@
+# Milestone 6.1 — Twitch Live Intelligence (public metadata and clip signals)
+
+Clip Studio now has a **Twitch metadata monitor** and an independent **Public Clip Signals** queue under **Platforms**. Add another broadcaster to your watchlist, click **Monitor metadata**, then **Scan monitored streams**. The server queries Twitch's official `Get Streams` endpoint and, while the broadcaster is live, requests already-existing Twitch clips created during the current broadcast from `Get Clips`. It does **not** invoke `Create Clip`, publish to any platform, download media, record the livestream, or require your local computer. Public clips are scored by their observed views and views-per-hour; this is **community engagement ranking, not AI analysis of raw stream footage**. Existing suggestions are deduplicated and can be saved/dismissed privately. You can preview a signal using the official Twitch embedded clip player or watch the stream itself using the official Twitch player. Ranking cannot find moments that nobody has clipped yet.
+
+## Optional 10-minute cloud-hosted scheduled scan
+
+This milestone also adds `.github/workflows/twitch-monitor.yml`, a GitHub Actions scheduler with a 10-minute cron and manual Run workflow action. **The scheduler is inactive until both matching secrets are configured.** Generate a unique random secret of at least 32 characters (a 64-character hexadecimal secret is a good choice). Set **Render → Clip Studio → Environment → `MONITOR_SCAN_KEY`** to that value, and set **GitHub repository → Settings → Secrets and variables → Actions → New repository secret → `CLIP_STUDIO_MONITOR_KEY`** to exactly the same value. Redeploy Render if needed. The scheduled action sends a POST to `/api/twitch/monitor/scheduled`, which rejects missing/wrong secrets and uses existing encrypted Twitch OAuth tokens. No passwords or OAuth tokens should be committed. Scheduled checks are best-effort: GitHub Actions schedules can be delayed, and Render Free can sleep or lose local SQLite records between deployments/restarts. Reliable monitoring needs paid persistent infrastructure.
+
+## Scope / publishing guardrails
+
+- A live public stream and permission to make Twitch-native clips do **not** grant an API to copy the whole video or permission to republish that broadcaster's footage on TikTok/YouTube.
+- The monitor only offers signals from other users' already-existing public clips; it does not record, transcribe or analyze audio/video and cannot automatically find never-clipped moments.
+- Native Twitch clip creation remains **disabled** to prevent unreviewed public publication. Monitoring suggestions never publish.
+- Full livestream AI clipping needs a lawful media feed with broadcaster/editor authorization where required, persistent storage, video-worker processing, an AI scoring pipeline, and separate explicit per-destination publishing integrations. Those are **not yet completed**.
+- There is no change to existing uploaded-video transcription, aspect variants, subtitles, manual approval, and MP4 export.
+
+Official references: https://dev.twitch.tv/docs/api/reference/streams and https://dev.twitch.tv/docs/api/reference/clips
+
+---
+
 # Review-first Twitch highlight workflow — safety migration
 
 **Important behavior change:** The old `POST /api/twitch/clips` endpoint has been disabled because it created a Twitch-native clip immediately and did **not** create a private Clip Studio draft. The streamer watchlist now offers **Prepare private highlights** instead of **Create Twitch clip**. This launches the existing upload-and-analysis flow for creator-authorized recording footage. It does **not** currently capture someone else's live stream, monitor all stream audio continuously, or download a Twitch VOD without rights. Previous published Twitch clips are unchanged.
