@@ -23,7 +23,66 @@ $('reviewGrid').innerHTML=c.filter(x=>x.status!=='exported').map(makeCard).join(
 $('exportGrid').innerHTML=c.filter(x=>x.status==='exported').map(makeCard).join('')||'<div class="muted">No exported clips yet.</div>';
 $('monitors').innerHTML=m.map(x=>`<div class="row" style="padding:12px 0;border-bottom:1px solid #343345"><div class="grow"><b>${escapeHTML(x.label)}</b><div class="muted small">${escapeHTML(x.platform)} · ${escapeHTML(x.status)} ${x.error?'· '+escapeHTML(x.error):''}</div></div>${x.status==='running'?`<button class="danger" onclick="monAction('${x.id}','stop')">Stop</button>`:`<button onclick="monAction('${x.id}','start')">Start</button>`}</div>`).join('')||'<p class="muted">No monitors configured.</p>'}
 async function refresh(){try{current=await api('/state');render()}catch(e){toast(e.message)}}
-$('uploadForm').onsubmit=async e=>{e.preventDefault();let f=$('file').files[0];if(!f)return;$('uploadBtn').disabled=true;$('uploadBtn').textContent='Uploading…';try{await api('/upload',{method:'POST',body:new FormData(e.target)});toast('Uploaded. Highlight analysis has started.');e.target.reset();await refresh()}catch(ex){toast(ex.message)}finally{$('uploadBtn').disabled=false;$('uploadBtn').textContent='Upload & analyze'}};
+
+function drawCropRegion(){
+ const box=$('cropBox'),r=cropRegion;
+ box.classList.toggle('hidden',!r);
+ if(r){box.style.left=(r.x*100)+'%';box.style.top=(r.y*100)+'%';box.style.width=(r.w*100)+'%';box.style.height=(r.h*100)+'%'}
+}
+function cropPoint(e){
+ const rect=$('cropVideo').getBoundingClientRect();
+ return {x:Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),y:Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height))}
+}
+const crop=$('cropSurface');
+crop.addEventListener('pointerdown',e=>{
+ if($('uploadCropStage').classList.contains('hidden'))return;
+ const p=cropPoint(e);if(p.y>.92)return;
+ cropStart=p;crop.setPointerCapture(e.pointerId);$('cropVideo').pause();e.preventDefault()
+});
+crop.addEventListener('pointermove',e=>{
+ if(!cropStart)return;
+ const p=cropPoint(e);cropRegion={x:Math.min(cropStart.x,p.x),y:Math.min(cropStart.y,p.y),w:Math.abs(p.x-cropStart.x),h:Math.abs(p.y-cropStart.y)};
+ drawCropRegion()
+});
+crop.addEventListener('pointerup',e=>{
+ if(!cropStart)return;
+ const p=cropPoint(e);cropRegion={x:Math.min(cropStart.x,p.x),y:Math.min(cropStart.y,p.y),w:Math.abs(p.x-cropStart.x),h:Math.abs(p.y-cropStart.y)};
+ cropStart=null;if(crop.hasPointerCapture(e.pointerId))crop.releasePointerCapture(e.pointerId);
+ if(cropRegion.w<.08||cropRegion.h<.08){cropRegion=null;$('cropHint').textContent='Draw a larger face-cam box (at least 8% in each direction).'}
+ else{$('cropHint').textContent='Crop saved for every highlight · '+Math.round(cropRegion.w*100)+'% × '+Math.round(cropRegion.h*100)+'%'}
+ drawCropRegion()
+});
+function uploadLayout(){
+ const ratio=$('uploadRatio').value;
+ if(ratio!=='9:16'&&$('uploadFacecam').value==='true'){$('uploadFacecam').value='false';cropRegion=null;drawCropRegion()}
+ $('uploadFacecam').disabled=ratio!=='9:16';
+ $('uploadCropStage').classList.toggle('hidden',ratio!=='9:16'||$('uploadFacecam').value!=='true');
+}
+$('uploadRatio').addEventListener('change',uploadLayout);
+$('uploadFacecam').addEventListener('change',uploadLayout);
+$('file').addEventListener('change',()=>{
+ cropRegion=null;drawCropRegion();if(cropObjectUrl)URL.revokeObjectURL(cropObjectUrl);
+ const f=$('file').files[0];
+ if(f){cropObjectUrl=URL.createObjectURL(f);$('cropVideo').src=cropObjectUrl;$('cropHint').textContent='Drag on the video to select its face-cam.'}
+ else{cropObjectUrl=null;$('cropVideo').removeAttribute('src')}
+});
+$('uploadForm').onsubmit=async e=>{
+ e.preventDefault();const f=$('file').files[0];if(!f)return;
+ if($('uploadFacecam').value==='true'&&!cropRegion){toast('Draw the face-cam crop before uploading');return}
+ $('uploadBtn').disabled=true;$('uploadBtn').textContent='Uploading…';
+ try{
+  const body=new FormData(e.target);body.set('has_facecam',$('uploadFacecam').value);
+  body.set('facecam_region',cropRegion?JSON.stringify(cropRegion):'');
+  await api('/upload',{method:'POST',body});
+  toast('Uploaded with saved aspect ratio and face-cam crop.');e.target.reset();
+  cropRegion=null;drawCropRegion();uploadLayout();
+  $('cropVideo').pause();$('cropVideo').removeAttribute('src');
+  if(cropObjectUrl)URL.revokeObjectURL(cropObjectUrl);cropObjectUrl=null;
+  await refresh()
+ }catch(ex){toast(ex.message)}
+ finally{$('uploadBtn').disabled=false;$('uploadBtn').textContent='Upload & analyze'}
+};
+uploadLayout();
 $('liveForm').onsubmit=async e=>{e.preventDefault();let p=Object.fromEntries(new FormData(e.target));try{await api('/monitors',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});toast('Monitor added. Click Start to begin.');e.target.reset();await refresh()}catch(ex){toast(ex.message)}};
 async function monAction(id,action){try{await api('/monitors/'+id+'/'+action,{method:'POST'});toast('Monitor '+action+' requested');await refresh()}catch(e){toast(e.message)}}
 
