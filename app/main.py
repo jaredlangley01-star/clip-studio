@@ -455,7 +455,7 @@ def platform_callback(platform:str,state:str='',code:str='',error:str=''):
         if not account:raise HTTPException(409,'This Twitch token has no accessible user')
         identity={'id':account['id'],'name':account['display_name']}
     save_platform_account(platform,result,identity)
-    return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>Connected</title></head><body style="font-family:system-ui;background:#12111e;color:white;padding:40px"><h2>Account connected successfully</h2><p>You can close this tab and return to Clip Studio → Platforms.</p></body></html>')
+    return RedirectResponse(url='/?connected='+platform,status_code=303)
 
 @app.delete('/api/platforms/{platform}')
 def disconnect_platform(platform:str,_:None=Depends(auth)):
