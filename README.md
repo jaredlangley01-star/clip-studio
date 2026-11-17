@@ -1,3 +1,9 @@
+## Upload-time aspect ratio and face-cam crop (new)
+
+On **Videos → Upload a recording**, select the output aspect ratio (9:16, 1:1, or 16:9). For 9:16 choose whether the source contains an embedded face-cam. If yes, the uploaded footage appears in-browser; pause/seek to a clear frame and **drag a rectangle around the face-cam** before clicking **Upload & analyze**. The normalized crop and output aspect ratio are saved on the video and applied to **every highlight from that recording**, including newly generated highlights after reanalysis. Automatic face detection and per-highlight crop controls have been removed. Portrait face-cam layout places the cropped camera in the upper 40% and gameplay below it. Subtitle text/timings are still editable individually in Review Queue. 1:1 and 16:9 exports use the standard fit-with-blurred-background layout and do not use face-cam extraction.
+
+Crop selection needs a browser-playable video preview (typically MP4). For unusual formats supported by the backend but not the browser, convert to MP4 to choose a crop. Preview and final FFmpeg framing can differ slightly.
+
 # Clip Studio — Free Render Test Build
 
 This is a **free-tier demo**, not a production or 24/7 livestream deployment.
