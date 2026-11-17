@@ -1,3 +1,12 @@
+# Milestone 5.2 — Connected-channel Recording Inbox
+
+The Platforms page now has an **on-demand Recording Inbox** for connected YouTube and Twitch accounts. Use **Scan connected channels** to discover and deduplicate uploads and live-status records. Existing matched recordings keep their status when scanned again. The inbox is metadata only: the official APIs do **not** provide downloadable source recordings.
+
+To clip a discovered recording, download **your own original file** from YouTube Studio or Twitch Video Producer, then select **Attach recording & analyze** in Clip Studio. This opens the existing Video Library upload form with the recording's platform identity attached. Choose aspect ratio, facecam crop, highlight count and length as before, then upload your original MP4. The usual transcript-based analysis runs without separate manual steps. The discovered entry links to the resulting video.
+
+Safety and limits: Source files must be user-provided; Clip Studio does not automatically fetch videos from arbitrary URLs, bypass YouTube/Twitch permissions, or record livestreams. Scanning only runs on demand and does not monitor 24/7. Render Free still has ephemeral local files/database; recording inbox state can disappear on restart/redeployment. Continuous livestream monitoring, scheduled discovery, durable cloud asset storage and worker-based ingest need separate hosted services and platform-compliant capture paths. No automatic publishing is enabled.
+
+---
 # Milestone 5 — YouTube & Twitch platform connections (read-only)
 
 The new **Platforms** sidebar page enables read-only YouTube and Twitch OAuth connections, channel-specific VOD discovery and current live status. Video metadata comes from the official YouTube Data/Live APIs and Twitch Helix. Clip Studio does **not** download YouTube/Twitch audiovisual streams, bypass platform protections, auto-publish videos, or persistently record livestreams in this milestone. Use the platform's creator tools to download a recording you own and upload that MP4 via Clip Studio's existing Videos page.
