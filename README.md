@@ -1,3 +1,16 @@
+# Subtitle Style Studio
+
+Clip editor keeps its familiar two-column video/editor layout but uses wider columns, improved padding, and roomier subtitle rows. Under Review / Edit, the right pane includes three subtabs:
+
+- **Subtitle Text**: select None, Bold Uppercase, Minimal, or Custom; edit individual transcript text/timing, add/delete subtitles.
+- **Style Designer**: see a frame from the current clip behind the sample caption; choose built-in or uploaded font, font size, text/stroke colours, stroke thickness, opacity and vertical bottom margin. Save a named preset or load a previous one.
+- **Font Library**: upload a user-owned TTF/OTF up to 3 MB (validated by fontTools). The new font appears in Style Designer and FFmpeg burns it into the exported clip through libass's fontsdir option.
+
+Preset styles and selected custom fonts are stored with the clip; if you export, libass uses the corresponding font and colour style. Font family names in uploads currently support ASCII letters/numbers/spaces/underscores/hyphens. Presets are not automatically applied to all clips; choose the saved preset in each clip that needs it.
+
+**Render Free limitation:** Font files and preset SQLite records live on temporary filesystem and are not durable across redeploys or server restarts. Missing uploaded fonts block exports rather than silently substituting a different face. Move these assets to persistent object storage before using this workflow in production.
+
+---
 # Milestone 4 — Intelligent Review & Batch Workflow
 
 Clip Studio keeps the working upload → highlight → review → export flow.
