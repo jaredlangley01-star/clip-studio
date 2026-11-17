@@ -357,6 +357,6 @@ async function saveEdit(approve){
 }
 async function reanalyze(id){const v=current.videos.find(x=>x.id===id);if(!v)return;if(!confirm('Reanalyze '+v.name+'? This replaces unapproved highlight suggestions but keeps exported clips.'))return;try{const data=new URLSearchParams({highlight_count:$('highlightCount').value,clip_length:$('clipLength').value});await api('/videos/'+id+'/reanalyze?'+data,{method:'POST'});toast('Reanalysis started. Transcription status will update here.');await refresh()}catch(e){toast(e.message)}}
 async function discard(id){if(!confirm('Discard this highlight?'))return;try{await api('/clips/'+id,{method:'DELETE'});await refresh()}catch(e){toast(e.message)}}
-async function loadCapabilities(){try{const c=await api('/capabilities');$('transcriptionStatus').textContent=c.transcription_enabled?'Speech transcription enabled · word-timed captions available':'Audio-only mode · add TRANSCRIPTION_API_KEY in Render to enable speech-based highlights and captions'}catch(e){$('transcriptionStatus').textContent='Speech provider status unavailable'}}
+async function loadCapabilities(){try{const c=await api('/capabilities');$('transcriptionStatus').textContent=(c.transcription_enabled?'Speech transcription enabled':'Audio-only mode')+' · '+(c.semantic_ranking_enabled?'Optional semantic AI ranking enabled':'Explainable speech/audio ranking')}catch(e){$('transcriptionStatus').textContent='Speech provider status unavailable'}}
 loadCapabilities();refresh();setInterval(refresh,7000);
 </script></body></html>
