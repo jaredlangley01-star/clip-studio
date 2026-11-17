@@ -1,3 +1,25 @@
+# Milestone 5 — YouTube & Twitch platform connections (read-only)
+
+The new **Platforms** sidebar page enables read-only YouTube and Twitch OAuth connections, channel-specific VOD discovery and current live status. Video metadata comes from the official YouTube Data/Live APIs and Twitch Helix. Clip Studio does **not** download YouTube/Twitch audiovisual streams, bypass platform protections, auto-publish videos, or persistently record livestreams in this milestone. Use the platform's creator tools to download a recording you own and upload that MP4 via Clip Studio's existing Videos page.
+
+## Required Render Environment variables
+
+- `PUBLIC_BASE_URL=https://clip-studio-t7r6.onrender.com` (use the URL of your own deployment, no trailing slash)
+- `OAUTH_ENCRYPTION_KEY` — create a persistent Fernet key with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Keep it only in Render. **Keep the key unchanged** when redeploying, or connected tokens become unreadable.
+- `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` — Google Cloud project, enable YouTube Data API v3, create an OAuth Web application and authorize `https://clip-studio-t7r6.onrender.com/api/platforms/youtube/callback`. Grant YouTube read-only scope and configure OAuth consent screen appropriately.
+- `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET` — register an application at Twitch Developer Console and add `https://clip-studio-t7r6.onrender.com/api/platforms/twitch/callback` as an OAuth redirect URI.
+
+Do not paste client secrets or access tokens into GitHub. App uses Basic authentication, OAuth CSRF nonces with 10-minute expiry, and encrypts provider tokens in SQLite via Fernet.
+
+## Known limitations
+
+- Render free service uses ephemeral SQLite. Account connections and oauth states disappear when its filesystem resets; they must be reconnected. Use persistent database and key management for production.
+- Accounts are authorized individually; no multi-user identity/permission roles in this demo.
+- YouTube's official APIs supply metadata, **not source-video files**. Twitch's Helix Get Videos supplies VOD metadata; obtain your own video via Twitch Video Producer.
+- Livestream status is an on-demand read of official API data, not persistent monitoring. Continuous capture, chat-spike analysis, durable video jobs, automatic imports and authorized publishing need later infrastructure and explicit integration work.
+- Google verification/YouTube API quotas and Twitch developer setup may apply.
+
+---
 # Subtitle Style Studio
 
 Clip editor keeps its familiar two-column video/editor layout but uses wider columns, improved padding, and roomier subtitle rows. Under Review / Edit, the right pane includes three subtabs:
