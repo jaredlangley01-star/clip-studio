@@ -4,6 +4,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
-ENV DATA_DIR=/app/storage PYTHONUNBUFFERED=1
+ENV DATA_DIR=/tmp/clip-studio PYTHONUNBUFFERED=1
 EXPOSE 10000
 CMD ["sh","-c","uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}"]

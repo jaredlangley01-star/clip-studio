@@ -7,7 +7,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-ROOT=Path(os.environ.get('DATA_DIR','/app/storage')).resolve()
+ROOT=Path(os.environ.get('DATA_DIR','/tmp/clip-studio')).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
 for name in ('uploads','clips','live'):(ROOT/name).mkdir(exist_ok=True)
 DB=ROOT/'database.sqlite3'
@@ -268,6 +268,8 @@ def record_live(mid, stop):
 
 @app.post('/api/monitors/{mid}/start')
 def start_monitor(mid:str,_:None=Depends(auth)):
+    if os.getenv('ENABLE_LIVE_MONITOR','false').lower() != 'true':
+        raise HTTPException(503,'Live monitoring is disabled on the free test deployment. Upload a short video instead.')
     if mid in LIVE:raise HTTPException(409,'Monitor already running')
     row=execute('SELECT id FROM monitors WHERE id=?',(mid,)).fetchone()
     if not row:raise HTTPException(404,'Monitor not found')

@@ -1,3 +1,34 @@
+# Clip Studio — Free Render Test Build
+
+This is a **free-tier demo**, not a production or 24/7 livestream deployment.
+
+## What changed from Build 1
+
+- `render.yaml`: `plan: free` instead of `starter`; removed `disk` completely.
+- Temporary writable media and SQLite location: `/tmp/clip-studio`.
+- Limited uploads to `0.1 GB` (approximately 102 MiB) for short demo videos.
+- `ENABLE_LIVE_MONITOR=false`: prevents starting unstable live recordings on Render Free.
+- Existing upload → automatic audio-activity highlights → review/edit → approve → MP4 export remains available for small tests, subject to the service's processing capacity.
+
+## Deploy to Render
+
+1. In GitHub, replace your **repository-root** `render.yaml`, `Dockerfile`, `app/main.py`, and `app/static/index.html` with the files in this package (or upload this entire project's contents to repository root). Also replace `.env.example` and `README.md` for consistency.
+2. Commit directly to `main`.
+3. Render → **New** → **Blueprint** → select your `clip-studio` repo and `main` branch.
+4. When asked, provide `APP_PASSWORD` as a unique strong password. Username is `admin`.
+5. Deploy. Visit your `.onrender.com` URL; upload a short MP4 (recommended: less than 60 seconds and 50 MB).
+6. Review the suggested highlight and approve/export one clip.
+
+**If an older paid Blueprint/service has already been created:** check Render service settings for the selected plan and disk; editing the repo alone does not necessarily delete previously provisioned paid resources. A fresh Blueprint may be easier for the free test.
+
+## Limitations
+
+Render Free web services can spin down after 15 minutes without incoming traffic. Waking can take time. Local storage is **ephemeral**: uploads, exports and the SQLite database may vanish on restarts, redeploys or spin-down. A 100 MB upload can still fail if HTTP limits, free CPU/RAM, storage or request timing are exceeded. This app processes tasks in process threads and is not a durable job queue. Use small source videos only. This demo does not download YouTube videos, connect directly to Twitch/YouTube accounts, add captions or publish clips. Do not use for irreplaceable content.
+
+When ready to move beyond testing, use paid compute plus object storage and a database, and a background worker for continuous live monitoring.
+
+---
+
 # Clip Studio — Build 1
 
 A small hosted, password-protected clipping MVP. Upload your own video or configure an **authorized HTTPS HLS** livestream, suggest audio-activity highlights, review/trim candidates, and **manually approve** vertical MP4 exports. **It never posts automatically.**
