@@ -103,6 +103,26 @@ class CaptionEditorTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             main.validate_region({'x':0.9,'y':0,'w':0.3,'h':0.2})
 
+
+    def test_clip_layout_controls_and_apply_all(self):
+        main.execute('UPDATE clips SET aspect_ratio=?,facecam_mode=?,facecam_region=? WHERE id=?',
+          ('9:16','manual',json.dumps({'x':0.65,'y':0.05,'w':0.3,'h':0.42}),self.clip_id))
+        layout={'split':55,'cam_zoom':1.6,'cam_x':-55,'cam_y':25,'game_zoom':2.2,'game_x':20,'game_y':-75}
+        main.clip_edit(self.clip_id,main.ClipEdit(title='New',start=10,end=20,caption_style='none',layout=layout),None)
+        stored=json.loads(main.get_clip(self.clip_id)['layout'])
+        self.assertEqual(stored['split'],55)
+        self.assertEqual(stored['game_zoom'],2.2)
+        second=main.uid()
+        main.execute('INSERT INTO clips(id,video_id,title,start,end,score,status,path,created,caption_style,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+          (second,self.video_id,'Other',10,20,1,'review',None,main.utc(),'none','test'))
+        result=main.apply_layout_to_video(self.clip_id,layout,None)
+        self.assertEqual(result['updated'],2)
+        self.assertEqual(json.loads(main.get_clip(second)['layout'])['cam_x'],-55)
+        main.execute('DELETE FROM clips WHERE id=?',(second,))
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException):
+            main.validate_layout({'game_zoom':100},main.get_clip(self.clip_id))
+
     def test_portrait_facecam_export(self):
         import subprocess
         import shutil
@@ -115,6 +135,8 @@ class CaptionEditorTests(unittest.TestCase):
         main.execute('UPDATE videos SET path=? WHERE id=?',(str(source),self.video_id))
         main.execute('UPDATE clips SET start=?,end=?,caption_style=?,facecam_mode=?,aspect_ratio=?,facecam_region=? WHERE id=?',
           (0,1,'none','manual','9:16',json.dumps({'x':0.65,'y':0.05,'w':0.3,'h':0.42}),self.clip_id))
+        settings={'split':52,'cam_zoom':1.35,'cam_x':-40,'cam_y':20,'game_zoom':1.8,'game_x':65,'game_y':-25}
+        main.execute('UPDATE clips SET layout=? WHERE id=?',(json.dumps(settings),self.clip_id))
         main.render_job(self.clip_id)
         row=main.get_clip(self.clip_id)
         self.assertEqual(row['status'],'exported','Check FFmpeg filtergraph compatibility')
