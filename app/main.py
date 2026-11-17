@@ -595,20 +595,9 @@ class CreateTwitchClip(BaseModel):
 
 @app.post('/api/twitch/clips')
 def create_twitch_clip(p:CreateTwitchClip,_:None=Depends(auth)):
-    if not p.broadcaster_id.isdecimal():raise HTTPException(400,'Invalid broadcaster ID')
-    if not execute('SELECT 1 FROM twitch_watchlist WHERE broadcaster_id=?',(p.broadcaster_id,)).fetchone():
-        raise HTTPException(404,'Add the broadcaster to your watchlist first')
-    live=twitch_helix('/streams',{'user_id':p.broadcaster_id,'first':1})
-    if not live.get('data'):raise HTTPException(409,'This broadcaster is not live; live clipping is unavailable')
-    params={'broadcaster_id':p.broadcaster_id,'duration':round(p.duration,1)}
-    if p.title.strip():params['title']=p.title.strip()
-    result=twitch_helix('/clips',params,method='POST')
-    clip=(result.get('data') or [None])[0]
-    if not clip or not clip.get('id'):raise HTTPException(502,'Twitch did not return a clip ID')
-    execute('INSERT OR REPLACE INTO twitch_created_clips(id,broadcaster_id,edit_url,created_at) VALUES(?,?,?,?)',
-        (str(clip['id']),p.broadcaster_id,str(clip.get('edit_url') or ''),utc()))
-    return {'id':clip['id'],'edit_url':clip.get('edit_url'),
-            'note':'Twitch creates a native clip. Open the Twitch edit URL to review/publish it; it is not imported into Clip Studio.'}
+    # Safety: this endpoint previously created publicly visible Twitch clips immediately.
+    # Disabled deliberately while building a private, approval-first review pipeline.
+    raise HTTPException(409,'Immediate Twitch clip creation has been disabled. Choose a watched streamer, provide authorized source footage, review the AI highlights in Clip Studio, then explicitly approve exports. Twitch-native clip creation is not a private draft.')
 
 @app.get('/api/twitch/created-clips')
 def twitch_created_clips(_:None=Depends(auth)):
@@ -678,7 +667,7 @@ def transcript_data(vid:str,_:None=Depends(auth)):
 
 @app.post('/api/upload')
 async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_length:int=Form(35),aspect_ratio:str=Form('9:16'),has_facecam:bool=Form(False),facecam_region:str=Form(''),platform_source:str=Form(''),platform_item_id:str=Form(''),_:None=Depends(auth)):
-    if not 1<=highlight_count<=12 or not 10<=clip_length<=90:raise HTTPException(400,'Select 1–12 highlights and clip length 10–90 seconds')
+    if not 1<=highlight_count<=12 or not 10<=clip_length<=180:raise HTTPException(400,'Select 1–12 highlights and clip length 10–180 seconds')
     if aspect_ratio not in ('9:16','1:1','16:9'):raise HTTPException(400,'Choose a valid aspect ratio')
     if has_facecam and aspect_ratio!='9:16':raise HTTPException(400,'Facecam layout is currently supported only for 9:16')
     region=None
@@ -721,7 +710,7 @@ async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_leng
 
 @app.post('/api/videos/{vid}/reanalyze')
 def reanalyze(vid:str,highlight_count:int=8,clip_length:int=35,_:None=Depends(auth)):
-    if not 1<=highlight_count<=12 or not 10<=clip_length<=90:raise HTTPException(400,'Invalid highlight settings')
+    if not 1<=highlight_count<=12 or not 10<=clip_length<=180:raise HTTPException(400,'Invalid highlight settings')
     video=execute('SELECT * FROM videos WHERE id=?',(vid,)).fetchone()
     if not video:raise HTTPException(404,'Video not found')
     if not Path(video['path']).exists():raise HTTPException(404,'Original recording is no longer available on temporary storage')
@@ -862,6 +851,33 @@ def validate_layout(layout,clip):
         if not lo<=value<=hi:raise HTTPException(400,'Layout values out of range')
         result[key]=round(value,3)
     return result
+
+class ClipVariant(BaseModel):
+    aspect_ratio:str
+    with_facecam:bool=False
+
+@app.post('/api/clips/{cid}/variant')
+def create_clip_variant(cid:str,p:ClipVariant,_:None=Depends(auth)):
+    source=get_clip(cid)
+    if source['status'] not in ('review','render_failed','exported'):
+        raise HTTPException(409,'Variant can only be created from a saved highlight')
+    if p.aspect_ratio not in ('16:9','9:16'):raise HTTPException(400,'Choose 16:9 or 9:16')
+    if p.with_facecam and p.aspect_ratio!='9:16':raise HTTPException(400,'Facecam layout is for portrait clips only')
+    if p.with_facecam and not source['facecam_region']:
+        raise HTTPException(409,'Choose a facecam region on the original video before creating a portrait facecam variant')
+    if not execute('SELECT 1 FROM videos WHERE id=?',(source['video_id'],)).fetchone():
+        raise HTTPException(404,'Source video not found')
+    new_id=uid()
+    mode='manual' if p.with_facecam else 'off'
+    execute("""INSERT INTO clips(id,video_id,title,start,end,score,status,path,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region,layout,rank_score,rank_reason,caption_theme,caption_edits)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (new_id,source['video_id'],str(source['title'])+' ('+p.aspect_ratio+')',
+        source['start'],source['end'],source['score'],'review',None,utc(),
+        source['caption_style'],source['reason'],p.aspect_ratio,mode,
+        source['facecam_region'] if p.with_facecam else None,
+        source['layout'] if p.with_facecam else None,source['rank_score'],source['rank_reason'],
+        source['caption_theme'],source['caption_edits']))
+    return {'id':new_id,'status':'review','aspect_ratio':p.aspect_ratio,'facecam_mode':mode}
 
 @app.post('/api/clips/{cid}/layout/all')
 def apply_layout_to_video(cid:str,layout:dict,_:None=Depends(auth)):
