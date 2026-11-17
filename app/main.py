@@ -612,7 +612,25 @@ def create_twitch_clip(p:CreateTwitchClip,_:None=Depends(auth)):
 
 @app.get('/api/twitch/created-clips')
 def twitch_created_clips(_:None=Depends(auth)):
-    return [serialize(x) for x in execute('SELECT id,broadcaster_id,edit_url,created_at FROM twitch_created_clips ORDER BY created_at DESC LIMIT 50').fetchall()]
+    # Clip creation is asynchronous: a newly requested clip may not be playable
+    # immediately. Never invent a clip URL before Twitch confirms its existence.
+    rows=execute('SELECT id,broadcaster_id,edit_url,created_at FROM twitch_created_clips ORDER BY created_at DESC LIMIT 50').fetchall()
+    items=[serialize(x) for x in rows]
+    if not items:return []
+    try:
+        response=twitch_helix('/clips',[('id',x['id']) for x in items])
+        found={str(c['id']):c for c in response.get('data',[])}
+    except HTTPException:
+        found={}
+    for item in items:
+        clip=found.get(item['id'])
+        item['ready']=bool(clip)
+        item['title']=clip.get('title') if clip else None
+        item['url']=clip.get('url') if clip else None
+        item['thumbnail']=clip.get('thumbnail_url') if clip else None
+        item['duration']=clip.get('duration') if clip else None
+        item['share_available']='check_on_twitch'
+    return items
 
 @app.get('/api/platforms/{platform}/videos')
 def platform_videos(platform:str,_:None=Depends(auth)):
