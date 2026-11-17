@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 ROOT=Path(os.environ.get('DATA_DIR','/tmp/clip-studio')).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
-for name in ('uploads','clips','live'):(ROOT/name).mkdir(exist_ok=True)
+for name in ('uploads','clips','live','fonts'):(ROOT/name).mkdir(exist_ok=True)
 DB=ROOT/'database.sqlite3'
 app=FastAPI(title='Clip Studio',docs_url=None,redoc_url=None)
 security=HTTPBasic(auto_error=False)
@@ -52,6 +52,9 @@ def init():
         if 'layout' not in cols:c.execute("ALTER TABLE clips ADD COLUMN layout TEXT")
         if 'rank_score' not in cols:c.execute("ALTER TABLE clips ADD COLUMN rank_score INTEGER DEFAULT 0")
         if 'rank_reason' not in cols:c.execute("ALTER TABLE clips ADD COLUMN rank_reason TEXT")
+        if 'caption_theme' not in cols:c.execute("ALTER TABLE clips ADD COLUMN caption_theme TEXT")
+        c.execute('CREATE TABLE IF NOT EXISTS font_library(id TEXT PRIMARY KEY,family TEXT NOT NULL,filename TEXT NOT NULL,created TEXT)')
+        c.execute('CREATE TABLE IF NOT EXISTS caption_presets(id TEXT PRIMARY KEY,name TEXT NOT NULL,theme TEXT NOT NULL,created TEXT)')
 init()
 
 def utc():return datetime.now(timezone.utc).isoformat()
@@ -301,7 +304,7 @@ def root_page(_:None=Depends(auth)):
 @app.get('/api/state')
 def state(_:None=Depends(auth)):
     return {'videos':[serialize(x) for x in execute('SELECT v.id,v.name,v.source,v.status,v.duration,v.error,v.created,v.aspect_ratio,v.facecam_mode,v.facecam_region,t.provider AS transcript_provider,t.error AS transcript_error,CASE WHEN t.data IS NOT NULL THEN 1 ELSE 0 END AS has_transcript FROM videos v LEFT JOIN transcripts t ON t.video_id=v.id ORDER BY v.created DESC').fetchall()],
-        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region,layout,rank_score,rank_reason FROM clips ORDER BY created DESC').fetchall()],
+        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region,layout,rank_score,rank_reason,caption_theme FROM clips ORDER BY created DESC').fetchall()],
         'monitors':[serialize(x) for x in execute('SELECT id,label,platform,status,error,created FROM monitors ORDER BY created DESC').fetchall()]}
 
 @app.get('/api/capabilities')
@@ -392,21 +395,23 @@ class ClipEdit(BaseModel):
     end:float=Field(gt=0)
     caption_style:str='none'
     layout:dict|None=None
+    caption_theme:dict|None=None
 
 @app.patch('/api/clips/{cid}')
 def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
     clip=get_clip(cid); row=execute('SELECT duration FROM videos WHERE id=?',(clip['video_id'],)).fetchone()
     if p.end<=p.start or p.end-p.start>180 or (row['duration'] is not None and p.end>row['duration']+0.01):
         raise HTTPException(400,'Choose a valid range of up to 180 seconds within the video')
-    if p.caption_style not in ('none','bold','minimal'):raise HTTPException(400,'Invalid subtitle style')
+    if p.caption_style not in ('none','bold','minimal','custom'):raise HTTPException(400,'Invalid subtitle style')
     if p.caption_style!='none':
         transcript=execute('SELECT data,error FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone()
         if (not transcript or not transcript['data']) and not clip['caption_edits']:
             raise HTTPException(409,'No transcript or manually entered subtitles. Add subtitles in the editor before exporting.')
     layout=validate_layout(p.layout,clip) if p.layout is not None else (clip['layout'] or None)
+    theme=validate_caption_theme(p.caption_theme) if p.caption_theme is not None else (json.loads(clip['caption_theme']) if clip['caption_theme'] else None)
     thumbnail_path(cid).unlink(missing_ok=True)
-    execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,layout=?,status=?,path=NULL WHERE id=?',
-        (p.title,p.start,p.end,p.caption_style,json.dumps(layout) if isinstance(layout,dict) else layout,'review',cid))
+    execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,layout=?,caption_theme=?,status=?,path=NULL WHERE id=?',
+        (p.title,p.start,p.end,p.caption_style,json.dumps(layout) if isinstance(layout,dict) else layout,json.dumps(theme) if theme else None,'review',cid))
     return {'ok':True}
 
 def generated_captions(clip):
@@ -500,6 +505,104 @@ def srt_clock(seconds):
     ms=max(0,round(seconds*1000));h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
     return f'{h:02}:{m:02}:{s:02},{ms:03}'
 
+
+BUILTIN_FONTS=('DejaVu Sans','DejaVu Serif','DejaVu Sans Mono','Liberation Sans','Liberation Serif','Liberation Mono')
+def default_caption_theme(mode='bold'):
+    return {'font_id':None,'font_family':'DejaVu Sans','font_size':46 if mode=='bold' else 32,
+            'color':'#FFFFFF','stroke_color':'#000000','stroke_width':3 if mode=='bold' else 1.5,
+            'opacity':100,'position':12}
+
+def validate_caption_theme(theme):
+    if not isinstance(theme,dict):raise HTTPException(400,'Invalid subtitle appearance')
+    merged={**default_caption_theme(),**theme}
+    font_id=merged.get('font_id')
+    if font_id:
+        if not isinstance(font_id,str) or not re.fullmatch(r'[a-f0-9]{32}',font_id):
+            raise HTTPException(400,'Invalid font selection')
+        font=execute('SELECT family,filename FROM font_library WHERE id=?',(font_id,)).fetchone()
+        if not font or not (ROOT/'fonts'/font['filename']).is_file():
+            raise HTTPException(400,'Uploaded font is unavailable; choose another font')
+        family=font['family']
+    else:
+        font_id=None
+        family=merged.get('font_family','DejaVu Sans')
+        if family not in BUILTIN_FONTS:raise HTTPException(400,'Unsupported built-in font')
+    try:
+        size=float(merged['font_size']);stroke=float(merged['stroke_width'])
+        opacity=float(merged['opacity']);position=float(merged['position'])
+    except (KeyError,ValueError,TypeError):raise HTTPException(400,'Invalid subtitle style values')
+    if not all(math.isfinite(n) for n in (size,stroke,opacity,position)) or not (16<=size<=100 and 0<=stroke<=8 and 0<=opacity<=100 and 5<=position<=45):
+        raise HTTPException(400,'Subtitle style settings are out of range')
+    colors={}
+    for k in ('color','stroke_color'):
+        value=merged.get(k)
+        if not isinstance(value,str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',value):
+            raise HTTPException(400,'Subtitle colours must be #RRGGBB')
+        colors[k]=value.upper()
+    return {'font_id':font_id,'font_family':family,'font_size':round(size,1),'stroke_width':round(stroke,1),
+            'opacity':round(opacity,1),'position':round(position,1),**colors}
+
+def ass_color(hexcolor,opacity):
+    rgb=hexcolor.lstrip('#')
+    alpha=round(255*(1-opacity/100))
+    return f'&H{alpha:02X}{rgb[4:6]}{rgb[2:4]}{rgb[0:2]}'
+
+@app.get('/api/fonts')
+def list_fonts(_:None=Depends(auth)):
+    return {'builtin':list(BUILTIN_FONTS),'uploaded':[{'id':r['id'],'family':r['family']} for r in execute('SELECT * FROM font_library ORDER BY created DESC').fetchall()]}
+
+@app.post('/api/fonts')
+async def upload_font(file:UploadFile=File(...),_:None=Depends(auth)):
+    name=(file.filename or '').lower()
+    if Path(name).suffix not in ('.ttf','.otf'):raise HTTPException(400,'Upload a TTF or OTF font')
+    content=await file.read(3*1024*1024+1)
+    if len(content)>3*1024*1024:raise HTTPException(413,'Fonts must be smaller than 3 MB')
+    if content[:4] not in (b'\x00\x01\x00\x00',b'OTTO',b'true'):
+        raise HTTPException(400,'Invalid font file')
+    try:
+        from fontTools.ttLib import TTFont
+        import io
+        font=TTFont(io.BytesIO(content),lazy=False)
+        family=(font['name'].getDebugName(1) or '').strip()
+        font.close()
+    except Exception:
+        raise HTTPException(400,'Could not read the font file')
+    if not re.fullmatch(r'[A-Za-z0-9 _-]{1,64}',family):
+        raise HTTPException(400,'Font family name must contain only letters, numbers, spaces, - or _')
+    font_id=uid()
+    filename=font_id+Path(name).suffix
+    (ROOT/'fonts'/filename).write_bytes(content)
+    execute('INSERT INTO font_library(id,family,filename,created) VALUES(?,?,?,?)',(font_id,family,filename,utc()))
+    return {'id':font_id,'family':family}
+
+@app.get('/api/fonts/{font_id}/file')
+def get_font_file(font_id:str,_:None=Depends(auth)):
+    row=execute('SELECT filename FROM font_library WHERE id=?',(font_id,)).fetchone()
+    if not row:raise HTTPException(404,'Font not found')
+    path=ROOT/'fonts'/row['filename']
+    if not path.is_file():raise HTTPException(404,'Font file lost on server restart')
+    return FileResponse(path,media_type='font/ttf' if path.suffix=='.ttf' else 'font/otf',headers={'Cache-Control':'private, max-age=3600'})
+
+@app.get('/api/caption-presets')
+def list_caption_presets(_:None=Depends(auth)):
+    return [{'id':r['id'],'name':r['name'],'theme':json.loads(r['theme'])} for r in execute('SELECT * FROM caption_presets ORDER BY created DESC').fetchall()]
+
+class CaptionPresetCreate(BaseModel):
+    name:str=Field(min_length=1,max_length=50)
+    theme:dict
+
+@app.post('/api/caption-presets')
+def create_caption_preset(p:CaptionPresetCreate,_:None=Depends(auth)):
+    theme=validate_caption_theme(p.theme)
+    pid=uid()
+    execute('INSERT INTO caption_presets(id,name,theme,created) VALUES(?,?,?,?)',(pid,p.name.strip(),json.dumps(theme),utc()))
+    return {'id':pid,'name':p.name,'theme':theme}
+
+@app.delete('/api/caption-presets/{pid}')
+def delete_caption_preset(pid:str,_:None=Depends(auth)):
+    execute('DELETE FROM caption_presets WHERE id=?',(pid,))
+    return {'ok':True}
+
 def subtitle_file(clip):
     if clip['caption_style']=='none':return None
     captions=captions_for_clip(clip)
@@ -552,8 +655,11 @@ def render_job(cid):
         subs=subtitle_file(clip)
         if subs:
             escaped=str(subs).replace('\\','\\\\').replace(':','\\:').replace("'","\\'")
-            style='FontName=DejaVu Sans,FontSize=18,Bold=1,Outline=2,Alignment=2,MarginV=90' if clip['caption_style']=='bold' else 'FontName=DejaVu Sans,FontSize=15,Outline=1,Alignment=2,MarginV=90'
-            filtergraph+=f";[v]subtitles=filename='{escaped}':force_style='{style}'[outv]"
+            theme=validate_caption_theme(json.loads(clip['caption_theme']) if clip['caption_theme'] else default_caption_theme(clip['caption_style']))
+            fontfamily=theme['font_family']
+            margin=round(height*theme['position']/100)
+            style=f"FontName={fontfamily},FontSize={theme['font_size']},PrimaryColour={ass_color(theme['color'],theme['opacity'])},OutlineColour={ass_color(theme['stroke_color'],theme['opacity'])},Bold={1 if clip['caption_style']=='bold' else 0},Outline={theme['stroke_width']},Shadow=0,BorderStyle=1,Alignment=2,MarginV={margin}"
+            filtergraph+=f";[v]subtitles=filename='{escaped}':fontsdir='{str(ROOT/'fonts')}':force_style='{style}'[outv]"
         video_map='[outv]' if subs else '[v]'
         cmd(['ffmpeg','-y','-nostdin','-v','error','-ss',str(clip['start']),'-i',video['path'],'-t',str(clip['end']-clip['start']),'-filter_complex',filtergraph,'-map',video_map,'-map','0:a:0?','-c:v','libx264','-preset','veryfast','-crf','24','-r','30','-c:a','aac','-b:a','128k','-movflags','+faststart',str(tmp)],timeout=900)
         os.replace(tmp,output)
