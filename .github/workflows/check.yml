@@ -27,6 +27,15 @@ jobs:
           print('Milestone 2 source checks passed')
           PY
 
+      - name: Browser JavaScript syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          content=Path('app/static/index.html').read_text()
+          script=content.split('<script>',1)[1].split('</script>',1)[0]
+          Path('/tmp/clipstudio-ui.js').write_text(script)
+          PY
+          node --check /tmp/clipstudio-ui.js
       - name: Caption integration tests
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
