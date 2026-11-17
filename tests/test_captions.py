@@ -79,7 +79,7 @@ class CaptionEditorTests(unittest.TestCase):
         from starlette.datastructures import UploadFile
         file=UploadFile(file=io.BytesIO(b'not a real video'),filename='test.mp4')
         from unittest.mock import patch
-        with patch.object(main.threading,'Thread'):
+        with patch.object(main,'process_video',lambda *args: None):
             result=asyncio.run(main.upload(file=file,highlight_count=4,clip_length=35,
                 aspect_ratio='9:16',has_facecam=True,
                 facecam_region=json.dumps({'x':0.70,'y':0.08,'w':0.28,'h':0.36}),_=None))
