@@ -42,6 +42,9 @@ def init():
         if 'caption_style' not in cols:c.execute("ALTER TABLE clips ADD COLUMN caption_style TEXT DEFAULT 'none'")
         if 'reason' not in cols:c.execute("ALTER TABLE clips ADD COLUMN reason TEXT DEFAULT 'Audio activity'")
         if 'caption_edits' not in cols:c.execute("ALTER TABLE clips ADD COLUMN caption_edits TEXT")
+        if 'aspect_ratio' not in cols:c.execute("ALTER TABLE clips ADD COLUMN aspect_ratio TEXT DEFAULT '9:16'")
+        if 'facecam_mode' not in cols:c.execute("ALTER TABLE clips ADD COLUMN facecam_mode TEXT DEFAULT 'off'")
+        if 'facecam_region' not in cols:c.execute("ALTER TABLE clips ADD COLUMN facecam_region TEXT")
 init()
 
 def utc():return datetime.now(timezone.utc).isoformat()
@@ -177,7 +180,7 @@ def root_page(_:None=Depends(auth)):
 @app.get('/api/state')
 def state(_:None=Depends(auth)):
     return {'videos':[serialize(x) for x in execute('SELECT v.id,v.name,v.source,v.status,v.duration,v.error,v.created,t.provider AS transcript_provider,t.error AS transcript_error,CASE WHEN t.data IS NOT NULL THEN 1 ELSE 0 END AS has_transcript FROM videos v LEFT JOIN transcripts t ON t.video_id=v.id ORDER BY v.created DESC').fetchall()],
-        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason FROM clips ORDER BY created DESC').fetchall()],
+        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region FROM clips ORDER BY created DESC').fetchall()],
         'monitors':[serialize(x) for x in execute('SELECT id,label,platform,status,error,created FROM monitors ORDER BY created DESC').fetchall()]}
 
 @app.get('/api/capabilities')
@@ -260,6 +263,9 @@ class ClipEdit(BaseModel):
     start:float=Field(ge=0)
     end:float=Field(gt=0)
     caption_style:str='none'
+    aspect_ratio:str='9:16'
+    facecam_mode:str='off'
+    facecam_region:dict[str,float]|None=None
 
 @app.patch('/api/clips/{cid}')
 def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
@@ -269,10 +275,15 @@ def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
     if p.caption_style not in ('none','bold','minimal'):raise HTTPException(400,'Invalid subtitle style')
     if p.caption_style!='none':
         transcript=execute('SELECT data,error FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone()
-        if not transcript or not transcript['data']:
-            detail=(transcript['error'] if transcript else None) or 'No transcript is available.'
-            raise HTTPException(409,'Cannot add subtitles: '+detail+' Reanalyze the video after fixing transcription.')
-    execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,status=?,path=NULL WHERE id=?',(p.title,p.start,p.end,p.caption_style,'review',cid))
+        if (not transcript or not transcript['data']) and not clip['caption_edits']:
+            raise HTTPException(409,'No transcript or manually entered subtitles. Add subtitles in the editor before exporting.')
+    if p.aspect_ratio not in ('9:16','1:1','16:9'):raise HTTPException(400,'Invalid aspect ratio')
+    if p.facecam_mode not in ('off','auto','manual'):raise HTTPException(400,'Invalid facecam mode')
+    if p.facecam_mode!='off' and p.aspect_ratio!='9:16':raise HTTPException(400,'Facecam enlargement is available with 9:16 output')
+    region=validate_region(p.facecam_region) if p.facecam_region else None
+    if p.facecam_mode=='manual' and not region:raise HTTPException(400,'Select a facecam region')
+    execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,aspect_ratio=?,facecam_mode=?,facecam_region=?,status=?,path=NULL WHERE id=?',
+        (p.title,p.start,p.end,p.caption_style,p.aspect_ratio,p.facecam_mode,json.dumps(region) if region else None,'review',cid))
     return {'ok':True}
 
 def generated_captions(clip):
@@ -313,8 +324,6 @@ class CaptionChanges(BaseModel):
 def update_captions(cid:str,p:CaptionChanges,_:None=Depends(auth)):
     clip=get_clip(cid)
     if clip['status']=='rendering':raise HTTPException(409,'Cannot edit captions while exporting')
-    if not execute('SELECT data FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone():
-        raise HTTPException(409,'No transcription exists')
     previous_end=clip['start']
     payload=[]
     for segment in p.captions:
@@ -322,9 +331,67 @@ def update_captions(cid:str,p:CaptionChanges,_:None=Depends(auth)):
             raise HTTPException(400,'Caption timestamps must be ordered and inside the highlight')
         payload.append({'start':round(segment.start,3),'end':round(segment.end,3),'text':segment.text.strip()})
         previous_end=segment.end
-    if not payload:raise HTTPException(400,'At least one caption is required')
+    # An empty list intentionally removes all subtitle lines for this clip.
     execute('UPDATE clips SET caption_edits=?,path=NULL,status=? WHERE id=?',(json.dumps(payload,ensure_ascii=False),'review',cid))
     return {'saved':True,'count':len(payload)}
+
+
+def validate_region(region):
+    if region is None:return None
+    try:
+        x,y,w,h=[float(region[k]) for k in ('x','y','w','h')]
+    except (TypeError,ValueError,KeyError):
+        raise HTTPException(400,'Invalid facecam region')
+    if not all(math.isfinite(n) for n in (x,y,w,h)) or x<0 or y<0 or w<0.08 or h<0.08 or x+w>1.0001 or y+h>1.0001:
+        raise HTTPException(400,'Facecam region must be inside the video and at least 8% wide and tall')
+    return {k:round(v,4) for k,v in zip(('x','y','w','h'),(x,y,w,h))}
+
+def detect_facecam_region(path, start, end):
+    """Conservative sampled detector: only select a face near a screen corner.
+    This does not claim to detect arbitrary streamer layouts."""
+    try:
+        import cv2, numpy as np
+    except ImportError:
+        return None,'OpenCV face detection is not installed'
+    detector=cv2.CascadeClassifier(cv2.data.haarcascades+'haarcascade_frontalface_default.xml')
+    if detector.empty():return None,'Face detector could not load'
+    picks=[]
+    for t in (start+0.5, start+(end-start)*0.5, max(start+0.5,end-0.5)):
+        try:
+            frame=subprocess.run(['ffmpeg','-nostdin','-v','error','-ss',str(max(0,t)),'-i',str(path),'-frames:v','1','-vf','scale=480:-2','-f','image2pipe','-vcodec','mjpeg','pipe:1'],capture_output=True,timeout=30)
+            img=cv2.imdecode(np.frombuffer(frame.stdout,dtype=np.uint8),cv2.IMREAD_COLOR)
+            if img is None:continue
+            hh,ww=img.shape[:2];gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+            faces=detector.detectMultiScale(gray,scaleFactor=1.1,minNeighbors=4,minSize=(17,17))
+            for fx,fy,fw,fh in faces:
+                cx=(fx+fw/2)/ww;cy=(fy+fh/2)/hh
+                # A facecam is usually a face in one of the screen's four corners.
+                if not ((cx<0.37 or cx>0.63) and (cy<0.40 or cy>0.60)):continue
+                # Avoid treating a large central person in the actual footage as a facecam.
+                if fw/ww>0.24 or fh/hh>0.48:continue
+                corner=('left' if cx<0.5 else 'right','top' if cy<0.5 else 'bottom')
+                picks.append((corner,cx,cy,fw/ww,fh/hh))
+        except Exception:continue
+    if not picks:return None,'No corner facecam detected. Choose Manual and select the camera region.'
+    groups={}
+    for item in picks:groups.setdefault(item[0],[]).append(item)
+    best=max(groups.values(),key=len)
+    if len(best)<2:return None,'Facecam position could not be confirmed across frames. Use Manual.'
+    cx=sum(v[1] for v in best)/len(best);cy=sum(v[2] for v in best)/len(best)
+    fw=max(v[3] for v in best);fh=max(v[4] for v in best)
+    w=min(0.46,max(0.20,fw*3.0));h=min(0.55,max(0.25,fh*3.3))
+    # Anchor the full camera box to the side nearest the detected face.
+    x=max(0,min(1-w,cx-(w*0.40 if cx<0.5 else w*0.60)))
+    y=max(0,min(1-h,cy-(h*0.38 if cy<0.5 else h*0.62)))
+    return validate_region({'x':x,'y':y,'w':w,'h':h}),None
+
+@app.get('/api/clips/{cid}/facecam/detect')
+def facecam_detect(cid:str,_:None=Depends(auth)):
+    clip=get_clip(cid)
+    video=execute('SELECT path FROM videos WHERE id=?',(clip['video_id'],)).fetchone()
+    if not video or not Path(video['path']).exists():raise HTTPException(404,'Video unavailable')
+    region,error=detect_facecam_region(video['path'],clip['start'],clip['end'])
+    return {'region':region,'error':error}
 
 def srt_clock(seconds):
     ms=max(0,round(seconds*1000));h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
@@ -351,8 +418,30 @@ def render_job(cid):
     clip=get_clip(cid); video=execute('SELECT path FROM videos WHERE id=?',(clip['video_id'],)).fetchone()
     output=ROOT/'clips'/(cid+'.mp4');tmp=ROOT/'clips'/(cid+'.partial.mp4')
     try:
-        # Center crop to portrait, with 9:16 canvas; preserves original aspect with blurred backdrop.
-        filtergraph="[0:v]split=2[bg][fg];[bg]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,boxblur=30:10[base];[fg]scale=540:960:force_original_aspect_ratio=decrease[small];[base][small]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
+        ratio=clip['aspect_ratio'] or '9:16'
+        if ratio not in ('9:16','1:1','16:9'):raise ValueError('Unknown aspect ratio')
+        width,height={'9:16':(540,960),'1:1':(720,720),'16:9':(960,540)}[ratio]
+        region=json.loads(clip['facecam_region']) if clip['facecam_region'] else None
+        if ratio=='9:16' and clip['facecam_mode']!='off':
+            if not region and clip['facecam_mode']=='auto':
+                region,error=detect_facecam_region(video['path'],clip['start'],clip['end'])
+                if not region:raise ValueError(error or 'No facecam detected; select a manual region')
+            region=validate_region(region)
+            if not region:raise ValueError('Facecam region is missing')
+            x,y,w,h=(region[k] for k in ('x','y','w','h'))
+            # Facecam fills the top 40%; the full game remains in the lower panel.
+            # All crop values are constrained to normalized source coordinates.
+            filtergraph=(f"[0:v]split=3[cam][game][back];"
+                f"[cam]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale=540:384:force_original_aspect_ratio=increase,crop=540:384,setsar=1[top];"
+                "[back]scale=540:576:force_original_aspect_ratio=increase,crop=540:576,boxblur=20:5[blur];"
+                "[game]scale=540:576:force_original_aspect_ratio=decrease,setsar=1[fg];"
+                "[blur][fg]overlay=(W-w)/2:(H-h)/2[bottom];"
+                "[top][bottom]vstack=inputs=2,format=yuv420p[v]")
+        else:
+            filtergraph=(f"[0:v]split=2[bg][fg];"
+                f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},boxblur=30:10[base];"
+                f"[fg]scale={width}:{height}:force_original_aspect_ratio=decrease,setsar=1[small];"
+                "[base][small]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]")
         subs=subtitle_file(clip)
         if subs:
             escaped=str(subs).replace('\\','\\\\').replace(':','\\:').replace("'","\\'")
