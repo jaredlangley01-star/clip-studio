@@ -102,7 +102,7 @@ def transcribe(path):
               part('timestamp_granularities[]',b'word')+
               part('file',wave.read_bytes(),'audio.mp3','audio/mpeg')+
               f'--{boundary}--\r\n'.encode())
-        req=urllib.request.Request(url,data=body,headers={'Authorization':'Bearer '+key,'Content-Type':'multipart/form-data; boundary='+boundary},method='POST')
+        req=urllib.request.Request(url,data=body,headers={'Authorization':'Bearer '+key,'Content-Type':'multipart/form-data; boundary='+boundary,'User-Agent':'ClipStudio/2.1','Accept':'application/json'},method='POST')
         with urllib.request.urlopen(req,timeout=180) as response:result=json.load(response)
         words=result.get('words') or []
         if not words:words=[{'start':v['start'],'end':v['end'],'word':v.get('text','')} for v in result.get('segments',[])]
