@@ -1,4 +1,4 @@
-import os, re, json, time, uuid, sqlite3, secrets, subprocess, threading, math, shutil
+import os, re, json, time, uuid, sqlite3, secrets, subprocess, threading, math, shutil, urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -37,6 +37,10 @@ def init():
         c.execute('CREATE TABLE IF NOT EXISTS videos(id TEXT PRIMARY KEY,name TEXT,source TEXT,status TEXT,path TEXT,duration REAL,error TEXT,created TEXT)')
         c.execute('CREATE TABLE IF NOT EXISTS clips(id TEXT PRIMARY KEY,video_id TEXT,title TEXT,start REAL,end REAL,score REAL,status TEXT,path TEXT,created TEXT, FOREIGN KEY(video_id) REFERENCES videos(id))')
         c.execute('CREATE TABLE IF NOT EXISTS monitors(id TEXT PRIMARY KEY,label TEXT,platform TEXT,source_url TEXT,status TEXT,error TEXT,created TEXT)')
+        c.execute('CREATE TABLE IF NOT EXISTS transcripts(video_id TEXT PRIMARY KEY,data TEXT,provider TEXT,error TEXT)')
+        cols=[r[1] for r in c.execute('PRAGMA table_info(clips)')]
+        if 'caption_style' not in cols:c.execute("ALTER TABLE clips ADD COLUMN caption_style TEXT DEFAULT 'none'")
+        if 'reason' not in cols:c.execute("ALTER TABLE clips ADD COLUMN reason TEXT DEFAULT 'Audio activity'")
 init()
 
 def utc():return datetime.now(timezone.utc).isoformat()
@@ -49,7 +53,7 @@ def duration(path):
     data=json.loads(cmd(['ffprobe','-v','quiet','-show_entries','format=duration','-of','json',str(path)],30).stdout)
     return float(data['format']['duration'])
 
-def analyze(path, dur, count=8):
+def analyze(path, dur, count=8, clip_length=35):
     # Transcript-free audio activity is an honest initial heuristic, not semantic AI.
     # Extract low-sample-rate mono audio into per-window RMS readings.
     if dur<3:return [(0,max(0.5,dur),0.5)]
@@ -69,7 +73,7 @@ def analyze(path, dur, count=8):
         return [(min(i*dur/n,max(0,dur-30)), min(dur,min(i*dur/n,max(0,dur-30))+30),0.1) for i in range(n)]
     ranked=sorted(range(len(energies)), key=lambda i:energies[i],reverse=True)
     chosen=[]
-    span=min(35,max(8,dur/2))
+    span=min(clip_length,max(1,dur))
     for idx in ranked:
         center=idx*window+window/2
         start=max(0,min(center-span/2,dur-span)); end=min(dur,start+span)
@@ -79,17 +83,75 @@ def analyze(path, dur, count=8):
     if not chosen:chosen=[(0,min(30,dur),0.1)]
     return sorted(chosen,key=lambda x:x[0])
 
-def process_video(vid, count=8):
+def transcribe(path):
+    key=os.getenv('TRANSCRIPTION_API_KEY','').strip()
+    if not key:return None,'Speech analysis is not configured'
+    url=os.getenv('TRANSCRIPTION_API_URL','https://api.groq.com/openai/v1/audio/transcriptions')
+    if not url.startswith('https://'):return None,'HTTPS transcription endpoint required'
+    wave=ROOT/'uploads'/(uid()+'.wav')
+    try:
+        cmd(['ffmpeg','-y','-nostdin','-v','error','-i',str(path),'-vn','-ac','1','-ar','16000','-c:a','pcm_s16le',str(wave)],timeout=240)
+        if wave.stat().st_size>20*1024*1024:return None,'Transcription audio exceeds 20 MB'
+        boundary='----ClipStudio'+uid()
+        def part(name,value,filename=None,content_type='text/plain'):
+            head=f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
+            if filename:head+=f'; filename="{filename}"'
+            return (head+f'\r\nContent-Type: {content_type}\r\n\r\n').encode()+value+b'\r\n'
+        body=(part('model',os.getenv('TRANSCRIPTION_MODEL','whisper-large-v3-turbo').encode())+
+              part('response_format',b'verbose_json')+
+              part('timestamp_granularities[]',b'word')+
+              part('file',wave.read_bytes(),'audio.wav','audio/wav')+
+              f'--{boundary}--\r\n'.encode())
+        req=urllib.request.Request(url,data=body,headers={'Authorization':'Bearer '+key,'Content-Type':'multipart/form-data; boundary='+boundary},method='POST')
+        with urllib.request.urlopen(req,timeout=180) as response:result=json.load(response)
+        words=result.get('words') or []
+        if not words:words=[{'start':v['start'],'end':v['end'],'word':v.get('text','')} for v in result.get('segments',[])]
+        return {'text':result.get('text',''),'words':words},None
+    except Exception as exc:
+        return None,('Transcription failed: '+str(exc))[:250]
+    finally:
+        wave.unlink(missing_ok=True)
+
+REACTIONS=('no way','oh my','unbelievable','insane','amazing','wait','what','wow','crazy','never','how','why','look','finally','incredible','surprise')
+def hybrid_picks(path,dur,count,span,transcript):
+    audio=analyze(path,dur,max(count*2,count),span)
+    words=(transcript or {}).get('words') or []
+    if not words:return [(a,b,score,'Audio activity') for a,b,score in audio[:count]]
+    candidates=[]
+    step=max(8,span/2)
+    t=0
+    while t<dur:
+        a=max(0,min(t,max(0,dur-span)));b=min(dur,a+span)
+        selected=[w for w in words if a<=float(w.get('start',-1))<b]
+        if len(selected)>=4:
+            text=' '.join(str(w.get('word',w.get('text',''))) for w in selected)
+            lower=text.lower()
+            reactions=sum(lower.count(k) for k in REACTIONS)
+            score=0.15*min(5,reactions)+0.15*min(3,text.count('?')+text.count('!'))+min(0.45,len(selected)/max(1,span*2.5)*0.45)
+            energy=max((v for x,y,v in audio if max(0,min(b,y)-max(a,x))>3),default=0)
+            candidates.append((round(a,2),round(b,2),round(score+min(energy,0.4),4),f'Speech highlight: {len(selected)} words, {reactions} reactions'))
+        t+=step
+    chosen=[]
+    for item in sorted(candidates,key=lambda item:item[2],reverse=True):
+        if any(max(0,min(item[1],v[1])-max(item[0],v[0]))>span*0.4 for v in chosen):continue
+        chosen.append(item)
+        if len(chosen)>=count:break
+    if not chosen:return [(a,b,v,'Audio activity') for a,b,v in audio[:count]]
+    return sorted(chosen,key=lambda v:v[0])
+
+def process_video(vid, count=8, clip_length=35):
     row=execute('SELECT * FROM videos WHERE id=?',(vid,)).fetchone()
     if not row:return
     try:
         d=duration(row['path'])
-        picks=analyze(Path(row['path']),d,count)
+        transcript,error=transcribe(Path(row['path']))
+        execute('INSERT OR REPLACE INTO transcripts(video_id,data,provider,error) VALUES(?,?,?,?)',(vid,json.dumps(transcript) if transcript else None,'Whisper API' if transcript else 'audio-only',error))
+        picks=hybrid_picks(Path(row['path']),d,count,min(clip_length,d),transcript)
         with lock:
             with db() as c:
                 c.execute('UPDATE videos SET status=?,duration=?,error=NULL WHERE id=?',('ready',d,vid))
-                for i,(start,end,score) in enumerate(picks,1):
-                    c.execute('INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?)',(uid(),vid,f'Highlight {i:02d}',start,end,score,'review',None,utc()))
+                for i,(start,end,score,reason) in enumerate(picks,1):
+                    c.execute('INSERT INTO clips(id,video_id,title,start,end,score,status,path,created,caption_style,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid(),vid,f'Highlight {i:02d}',start,end,score,'review',None,utc(),'bold' if transcript else 'none',reason))
     except Exception as e:
         execute('UPDATE videos SET status=?,error=? WHERE id=?',('failed',str(e)[:450],vid))
 
@@ -110,11 +172,22 @@ def root_page(_:None=Depends(auth)):
 @app.get('/api/state')
 def state(_:None=Depends(auth)):
     return {'videos':[serialize(x) for x in execute('SELECT id,name,source,status,duration,error,created FROM videos ORDER BY created DESC').fetchall()],
-        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created FROM clips ORDER BY created DESC').fetchall()],
+        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason FROM clips ORDER BY created DESC').fetchall()],
         'monitors':[serialize(x) for x in execute('SELECT id,label,platform,status,error,created FROM monitors ORDER BY created DESC').fetchall()]}
 
+@app.get('/api/capabilities')
+def capabilities(_:None=Depends(auth)):
+    return {'transcription_enabled':bool(os.getenv('TRANSCRIPTION_API_KEY','').strip()),'live_enabled':os.getenv('ENABLE_LIVE_MONITOR','false').lower()=='true','version':'2.0'}
+
+@app.get('/api/videos/{vid}/transcript')
+def transcript_data(vid:str,_:None=Depends(auth)):
+    row=execute('SELECT data,provider,error FROM transcripts WHERE video_id=?',(vid,)).fetchone()
+    if not row:raise HTTPException(404,'Transcript unavailable')
+    return {'transcript':json.loads(row['data']) if row['data'] else None,'provider':row['provider'],'error':row['error']}
+
 @app.post('/api/upload')
-async def upload(file:UploadFile=File(...),_:None=Depends(auth)):
+async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_length:int=Form(35),_:None=Depends(auth)):
+    if not 1<=highlight_count<=12 or not 10<=clip_length<=90:raise HTTPException(400,'Select 1–12 highlights and clip length 10–90 seconds')
     name=Path(file.filename or 'recording').name
     if Path(name).suffix.lower() not in ('.mp4','.mov','.mkv','.webm','.ts','.m4v'):
         raise HTTPException(400,'Please use MP4, MOV, MKV, WEBM, TS or M4V')
@@ -131,7 +204,7 @@ async def upload(file:UploadFile=File(...),_:None=Depends(auth)):
     except Exception:
         dest.unlink(missing_ok=True);raise
     execute('INSERT INTO videos VALUES(?,?,?,?,?,?,?,?)',(vid,name,'upload','processing',str(dest),None,None,utc()))
-    threading.Thread(target=process_video,args=(vid,),daemon=True).start()
+    threading.Thread(target=process_video,args=(vid,highlight_count,clip_length),daemon=True).start()
     return {'id':vid,'status':'processing'}
 
 @app.get('/api/video/{vid}/stream')
@@ -167,14 +240,40 @@ class ClipEdit(BaseModel):
     title:str=Field(min_length=1,max_length=120)
     start:float=Field(ge=0)
     end:float=Field(gt=0)
+    caption_style:str='none'
 
 @app.patch('/api/clips/{cid}')
 def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
     clip=get_clip(cid); row=execute('SELECT duration FROM videos WHERE id=?',(clip['video_id'],)).fetchone()
     if p.end<=p.start or p.end-p.start>180 or (row['duration'] is not None and p.end>row['duration']+0.01):
         raise HTTPException(400,'Choose a valid range of up to 180 seconds within the video')
-    execute('UPDATE clips SET title=?,start=?,end=?,status=?,path=NULL WHERE id=?',(p.title,p.start,p.end,'review',cid))
+    if p.caption_style not in ('none','bold','minimal'):raise HTTPException(400,'Invalid subtitle style')
+    execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,status=?,path=NULL WHERE id=?',(p.title,p.start,p.end,p.caption_style,'review',cid))
     return {'ok':True}
+
+def srt_clock(seconds):
+    ms=max(0,round(seconds*1000));h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
+    return f'{h:02}:{m:02}:{s:02},{ms:03}'
+
+def subtitle_file(clip):
+    if clip['caption_style']=='none':return None
+    row=execute('SELECT data FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone()
+    if not row or not row['data']:return None
+    words=json.loads(row['data']).get('words') or []
+    selected=[w for w in words if float(w.get('end',0))>clip['start'] and float(w.get('start',0))<clip['end']]
+    if not selected:return None
+    chunks=[];step=5 if clip['caption_style']=='bold' else 9
+    for index in range(0,len(selected),step):
+        part=selected[index:index+step]
+        a=max(0,float(part[0].get('start',0))-clip['start'])
+        b=min(clip['end']-clip['start'],float(part[-1].get('end',a+1))-clip['start'])
+        if b<=a:continue
+        line=' '.join(str(w.get('word',w.get('text',''))).strip() for w in part).replace('<','').replace('>','').replace('{','').replace('}','')
+        if clip['caption_style']=='bold':line=line.upper()
+        chunks.append(f'{len(chunks)+1}\n{srt_clock(a)} --> {srt_clock(b)}\n{line}\n')
+    if not chunks:return None
+    path=ROOT/'clips'/(clip['id']+'.srt');path.write_text('\n'.join(chunks),encoding='utf-8')
+    return path
 
 def render_job(cid):
     clip=get_clip(cid); video=execute('SELECT path FROM videos WHERE id=?',(clip['video_id'],)).fetchone()
@@ -182,7 +281,13 @@ def render_job(cid):
     try:
         # Center crop to portrait, with 9:16 canvas; preserves original aspect with blurred backdrop.
         filtergraph="[0:v]split=2[bg][fg];[bg]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,boxblur=30:10[base];[fg]scale=540:960:force_original_aspect_ratio=decrease[small];[base][small]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
-        cmd(['ffmpeg','-y','-nostdin','-v','error','-ss',str(clip['start']),'-i',video['path'],'-t',str(clip['end']-clip['start']),'-filter_complex',filtergraph,'-map','[v]','-map','0:a:0?','-c:v','libx264','-preset','veryfast','-crf','24','-r','30','-c:a','aac','-b:a','128k','-movflags','+faststart',str(tmp)],timeout=900)
+        subs=subtitle_file(clip)
+        if subs:
+            escaped=str(subs).replace('\\','\\\\').replace(':','\\:').replace("'","\\'")
+            style='FontName=DejaVu Sans,FontSize=18,Bold=1,Outline=2,Alignment=2,MarginV=90' if clip['caption_style']=='bold' else 'FontName=DejaVu Sans,FontSize=15,Outline=1,Alignment=2,MarginV=90'
+            filtergraph+=f";[v]subtitles=filename='{escaped}':force_style='{style}'[outv]"
+        video_map='[outv]' if subs else '[v]'
+        cmd(['ffmpeg','-y','-nostdin','-v','error','-ss',str(clip['start']),'-i',video['path'],'-t',str(clip['end']-clip['start']),'-filter_complex',filtergraph,'-map',video_map,'-map','0:a:0?','-c:v','libx264','-preset','veryfast','-crf','24','-r','30','-c:a','aac','-b:a','128k','-movflags','+faststart',str(tmp)],timeout=900)
         os.replace(tmp,output)
         execute('UPDATE clips SET path=?,status=? WHERE id=?',(str(output),'exported',cid))
     except Exception:
