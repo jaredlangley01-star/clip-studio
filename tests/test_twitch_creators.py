@@ -73,6 +73,31 @@ class TwitchCreatorTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             main.twitch_auth_headers(require_clip_scope=True)
 
+
+    def test_created_clips_query_playable_metadata(self):
+        main.execute('INSERT INTO twitch_created_clips(id,broadcaster_id,edit_url,created_at) VALUES(?,?,?,?)',
+            ('Clip123','123','https://www.twitch.tv/edit/Clip123',main.utc()))
+        with patch.object(main,'twitch_helix',return_value={'data':[{
+            'id':'Clip123','url':'https://clips.twitch.tv/Clip123','title':'Funny moment',
+            'thumbnail_url':'https://clips-media-assets2.twitch.tv/thumb.jpg','duration':30}]}):
+            items=main.twitch_created_clips(None)
+        self.assertTrue(items[0]['ready'])
+        self.assertEqual(items[0]['title'],'Funny moment')
+        self.assertEqual(items[0]['url'],'https://clips.twitch.tv/Clip123')
+        self.assertEqual(items[0]['share_available'],'check_on_twitch')
+
+    def test_created_clips_processing_does_not_claim_ready(self):
+        main.execute('INSERT INTO twitch_created_clips(id,broadcaster_id,edit_url,created_at) VALUES(?,?,?,?)',
+            ('NewClip','123','',main.utc()))
+        with patch.object(main,'twitch_helix',return_value={'data':[]}):
+            items=main.twitch_created_clips(None)
+        self.assertFalse(items[0]['ready'])
+        self.assertIsNone(items[0]['url'])
+        with patch.object(main,'twitch_helix',side_effect=HTTPException(502,'Twitch unavailable')):
+            items=main.twitch_created_clips(None)
+        self.assertFalse(items[0]['ready'])
+        self.assertIsNone(items[0]['url'])
+
     def test_get_broadcaster_public_clips(self):
         with patch.object(main,'twitch_helix',return_value={'data':[{'id':'clip1','title':'Moment','url':'https://clips.twitch.tv/clip1','view_count':10}]}):
             clips=main.twitch_broadcaster_clips('123',None)
