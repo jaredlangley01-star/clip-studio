@@ -45,7 +45,7 @@ class SubtitleStyleTests(unittest.TestCase):
                     main.validate_caption_theme(change)
     def test_libass_hex_colour_opacity(self):
         self.assertEqual(main.ass_color('#FF0000',100),'&H000000FF')
-        self.assertEqual(main.ass_color('#102030',50),'&H80203010')
+        self.assertEqual(main.ass_color('#102030',50),'&H80302010')
     def test_fontlist_has_builtin_families(self):
         library=main.list_fonts(None)
         self.assertIn('DejaVu Sans',library['builtin'])
