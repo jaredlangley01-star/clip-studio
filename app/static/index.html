@@ -118,40 +118,15 @@ function addCaption(){
   captionItems.push({start:Number(start.toFixed(2)),end:Number(end.toFixed(2)),text:'New subtitle'});
   captionItems.sort((a,b)=>a.start-b.start);markCaptionDirty();drawCaptions();$('captionTools').classList.remove('hidden')
 }
-function regionFromInputs(){
-  const vals=['X','Y','W','H'].map(k=>Number($('fc'+k).value)/100);
-  if(vals.some(x=>!Number.isFinite(x))||vals[0]<0||vals[1]<0||vals[2]<0.08||vals[3]<0.08||vals[0]+vals[2]>1.001||vals[1]+vals[3]>1.001)throw Error('Facecam region must fit inside the video, with width and height at least 8%');
-  return {x:vals[0],y:vals[1],w:vals[2],h:vals[3]}
-}
-function setRegionInputs(r){if(!r)return;['X','Y','W','H'].forEach((k,i)=>{$('fc'+k).value=Math.round(r[['x','y','w','h'][i]]*100)})}
+
 function updateVideoLayout(){
-  const ratio=$('editRatio').value,mode=$('facecamMode').value;
-  if(ratio!=='9:16'&&mode!=='off'){$('facecamMode').value='off'}
-  $('facecamMode').disabled=ratio!=='9:16';
-  $('facecamOptions').classList.toggle('hidden',ratio!=='9:16'||$('facecamMode').value==='off');
-  $('ratioPreview').dataset.ratio=ratio;
-  const active=ratio==='9:16'&&$('facecamMode').value!=='off';
-  $('ratioPreview').classList.toggle('facecam-on',active);
-  if(active){
-    try{const r=regionFromInputs();$('facecamPreview').style.objectPosition=(Math.round((r.x+r.w/2)*100))+'% '+Math.round((r.y+r.h/2)*100)+'%'}catch(e){}
-    $('facecamPreview').currentTime=$('preview').currentTime;
-  }
-  captionPosition()
+ const ratio=$('editRatio').value,active=ratio==='9:16'&&$('facecamMode').value==='manual';
+ $('ratioPreview').dataset.ratio=ratio;$('ratioPreview').classList.toggle('facecam-on',active);
+ captionPosition()
 }
-async function detectFacecam(){
-  if(!selected)return;
-  $('facecamStatus').textContent='Checking several frames for a corner face-cam…';
-  try{const r=await api('/clips/'+selected.id+'/facecam/detect');
-    if(r.region){setRegionInputs(r.region);$('facecamStatus').textContent='Face-cam detected. Adjust bounds if needed.';updateVideoLayout()}
-    else{$('facecamMode').value='manual';$('facecamStatus').textContent=r.error||'No face-cam detected. Select a region manually.';updateVideoLayout();toast($('facecamStatus').textContent)}
-  }catch(e){$('facecamStatus').textContent=e.message;toast(e.message)}
-}
-$('editRatio').addEventListener('change',updateVideoLayout);
-$('facecamMode').addEventListener('change',()=>{updateVideoLayout();if($('facecamMode').value==='auto')detectFacecam()});
-['X','Y','W','H'].forEach(k=>$('fc'+k).addEventListener('input',updateVideoLayout));
 $('preview').addEventListener('timeupdate',()=>{
-  const face=$('facecamPreview'),main=$('preview');
-  if(face.src&&Math.abs(face.currentTime-main.currentTime)>0.30)face.currentTime=main.currentTime
+ const face=$('facecamPreview'),main=$('preview');
+ if(face.src&&Math.abs(face.currentTime-main.currentTime)>0.30)face.currentTime=main.currentTime
 });
 $('preview').addEventListener('play',()=>{if($('ratioPreview').classList.contains('facecam-on'))$('facecamPreview').play().catch(()=>{})});
 $('preview').addEventListener('pause',()=>$('facecamPreview').pause());
@@ -178,14 +153,13 @@ function edit(id){
   const token=++editorToken,v=current.videos.find(x=>x.id===selected.video_id);
   $('editCaptionStyle').value=selected.caption_style||'none';
   $('editRatio').value=selected.aspect_ratio||'9:16';$('facecamMode').value=selected.facecam_mode||'off';
-  let reg=null;try{reg=JSON.parse(selected.facecam_region||'null')}catch(e){}setRegionInputs(reg||{x:0.72,y:0.03,w:0.26,h:0.3});
-  $('facecamStatus').textContent='Auto detects faces near a video corner; Manual uses the percentages below.';updateVideoLayout();
+  updateVideoLayout();
   $('captionHint').textContent=v?.has_transcript?'Transcript ready. Preview and adjust subtitle lines before exporting.':'No transcript available. You can add your own timed subtitle lines, or reanalyze to request Groq captions.';
   $('editTitle').value=selected.title;$('editStart').value=selected.start;$('editEnd').value=selected.end;
   $('captionTools').classList.add('hidden');$('captionOverlay').classList.add('hidden');
   $('preview').src='/api/video/'+selected.video_id+'/stream';$('facecamPreview').src=$('preview').src;$('modal').classList.remove('hidden');
   $('preview').addEventListener('loadedmetadata',function seek(){this.currentTime=selected.start;this.removeEventListener('loadedmetadata',seek)});
-  loadClipCaptions(id,token);if($('facecamMode').value==='auto')detectFacecam()
+  loadClipCaptions(id,token)
 }
 function closeEditor(){
   if(captionsDirty&&!confirm('Discard unsaved subtitle corrections?'))return;
@@ -197,7 +171,7 @@ async function saveEdit(approve){
   try{
     const id=selected.id;
     if(captionsDirty)await saveCaptionEdits();
-    await api('/clips/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('editTitle').value,start:Number($('editStart').value),end:Number($('editEnd').value),caption_style:$('editCaptionStyle').value,aspect_ratio:$('editRatio').value,facecam_mode:$('facecamMode').value,facecam_region:$('facecamMode').value==='off'?null:regionFromInputs()})});
+    await api('/clips/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('editTitle').value,start:Number($('editStart').value),end:Number($('editEnd').value),caption_style:$('editCaptionStyle').value})});
     if(approve)await api('/clips/'+id+'/approve',{method:'POST'});
     toast(approve?'Approved with corrected subtitles. Rendering MP4…':'Changes saved');
     captionsDirty=false;closeEditor();await refresh()
