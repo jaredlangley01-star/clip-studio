@@ -579,6 +579,9 @@ def render_worker():
                     return
             continue
         try:render_job(cid)
+        except Exception as exc:
+            print('Render queue error:',str(exc)[:200],flush=True)
+            execute('UPDATE clips SET status=? WHERE id=?',('render_failed',cid))
         finally:render_queue.task_done()
 
 def submit_render(cid):
