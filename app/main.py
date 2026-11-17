@@ -1,4 +1,4 @@
-import os, re, json, time, uuid, sqlite3, secrets, subprocess, threading, math, shutil, urllib.request
+import os, re, json, time, uuid, sqlite3, secrets, subprocess, threading, math, shutil, urllib.request, queue, hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -50,6 +50,8 @@ def init():
         if 'facecam_mode' not in cols:c.execute("ALTER TABLE clips ADD COLUMN facecam_mode TEXT DEFAULT 'off'")
         if 'facecam_region' not in cols:c.execute("ALTER TABLE clips ADD COLUMN facecam_region TEXT")
         if 'layout' not in cols:c.execute("ALTER TABLE clips ADD COLUMN layout TEXT")
+        if 'rank_score' not in cols:c.execute("ALTER TABLE clips ADD COLUMN rank_score INTEGER DEFAULT 0")
+        if 'rank_reason' not in cols:c.execute("ALTER TABLE clips ADD COLUMN rank_reason TEXT")
 init()
 
 def utc():return datetime.now(timezone.utc).isoformat()
@@ -152,6 +154,73 @@ def hybrid_picks(path,dur,count,span,transcript):
     if not chosen:return [(a,b,v,'Audio activity') for a,b,v in audio[:count]]
     return sorted(chosen,key=lambda v:v[0])
 
+
+# Explainable transcript/audio ranking, not a predictive virality rating.
+HOOK_TERMS=('wait','what happened','did you see','look at','no way','you will not','finally','the problem','here is why','let me explain','how to','the secret','watch this','unbelievable','i can’t believe','i cant believe')
+REACTION_TERMS=('wow','oh my god','no way','insane','crazy','incredible','let’s go','lets go','amazing','unbelievable')
+QUESTION_WORDS=('why','how','what','who','when','where')
+def score_highlight(start,end,energy,transcript):
+    words=[v for v in (transcript or {}).get('words',[]) if start<=float(v.get('start',-1))<end]
+    speech=' '.join(str(x.get('word',x.get('text',''))) for x in words)
+    lower=speech.lower()
+    hook=min(1.0,sum(1 for term in HOOK_TERMS if term in lower)/2)
+    reactions=min(1.0,sum(lower.count(term) for term in REACTION_TERMS)/2)
+    questions=min(1.0,(speech.count('?')+sum(lower.split().count(w) for w in QUESTION_WORDS))/3)
+    density=min(1.0,len(words)/max(1,(end-start)*2.1))
+    # Existing RMS detector is relative only: clip scores are heuristic selection priorities.
+    sound=min(1.0,math.sqrt(max(0,energy))*3)
+    if not words:
+        score=round(15+sound*55)
+        return min(99,score),f'Audio activity ({round(sound*100)}% normalized); transcript unavailable',None
+    score=min(99,round(15+hook*24+reactions*21+questions*12+density*18+sound*10))
+    reasons=[]
+    if hook>.2:reasons.append('strong opening or hook phrase')
+    if reactions>.2:reasons.append('reaction language')
+    if questions>.2:reasons.append('questions or curiosity')
+    if density>.5:reasons.append('continuous dialogue')
+    if sound>.4:reasons.append('audio energy')
+    explanation=' · '.join(reasons) if reasons else 'Dialogue and audio activity'
+    # Conservative, bounded title derived from actual speech (not imagined video events).
+    phrase=re.sub(r'\s+',' ',speech).strip(' .!?')
+    title=(phrase[:57].rsplit(' ',1)[0] if len(phrase)>60 else phrase[:60]) or None
+    return score,explanation,title
+
+def build_ranked_picks(path,dur,count,span,transcript):
+    original=hybrid_picks(path,dur,max(count*2,count),span,transcript)
+    proposals=[]
+    for a,b,raw,reason in original:
+        score,explanation,title=score_highlight(a,b,raw,transcript)
+        proposals.append({'start':a,'end':b,'rank':score,'reason':explanation,'title':title,'raw':raw})
+    proposals.sort(key=lambda v:(v['rank'],v['raw']),reverse=True)
+    picks=[]
+    for item in proposals:
+        if any(max(0,min(item['end'],x['end'])-max(item['start'],x['start']))>(item['end']-item['start'])*0.35 for x in picks):continue
+        picks.append(item)
+        if len(picks)>=count:break
+    return picks
+
+def thumbnail_path(cid):
+    return ROOT/'clips'/(cid+'.jpg')
+def ensure_thumbnail(cid):
+    clip=get_clip(cid)
+    path=thumbnail_path(cid)
+    if path.exists():return path
+    video=execute('SELECT path FROM videos WHERE id=?',(clip['video_id'],)).fetchone()
+    if not video or not Path(video['path']).exists():return None
+    frame=max(0,(float(clip['start'])+float(clip['end']))/2)
+    try:
+        cmd(['ffmpeg','-y','-nostdin','-v','error','-ss',str(frame),'-i',video['path'],'-frames:v','1','-vf','scale=480:-2','-q:v','5',str(path)],timeout=30)
+        return path if path.exists() else None
+    except Exception:
+        path.unlink(missing_ok=True)
+        return None
+
+@app.get('/api/clips/{cid}/thumbnail')
+def clip_thumbnail(cid:str,_:None=Depends(auth)):
+    path=ensure_thumbnail(cid)
+    if not path:raise HTTPException(404,'Thumbnail not available')
+    return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'private, max-age=180'})
+
 def process_video(vid, count=8, clip_length=35):
     row=execute('SELECT * FROM videos WHERE id=?',(vid,)).fetchone()
     if not row:return
@@ -159,12 +228,13 @@ def process_video(vid, count=8, clip_length=35):
         d=duration(row['path'])
         transcript,error=transcribe(Path(row['path']))
         execute('INSERT OR REPLACE INTO transcripts(video_id,data,provider,error) VALUES(?,?,?,?)',(vid,json.dumps(transcript) if transcript else None,'Whisper API' if transcript else 'audio-only',error))
-        picks=hybrid_picks(Path(row['path']),d,count,min(clip_length,d),transcript)
+        picks=build_ranked_picks(Path(row['path']),d,count,min(clip_length,d),transcript)
         with lock:
             with db() as c:
                 c.execute('UPDATE videos SET status=?,duration=?,error=NULL WHERE id=?',('ready',d,vid))
-                for i,(start,end,score,reason) in enumerate(picks,1):
-                    c.execute('INSERT INTO clips(id,video_id,title,start,end,score,status,path,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(uid(),vid,f'Highlight {i:02d}',start,end,score,'review',None,utc(),'bold' if transcript else 'none',reason,row['aspect_ratio'] or '9:16',row['facecam_mode'] or 'off',row['facecam_region']))
+                for i,p in enumerate(picks,1):
+                    c.execute('INSERT INTO clips(id,video_id,title,start,end,score,status,path,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region,rank_score,rank_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (uid(),vid,p['title'] or f'Highlight {i:02d}',p['start'],p['end'],p['raw'],'review',None,utc(),'bold' if transcript else 'none',p['reason'],row['aspect_ratio'] or '9:16',row['facecam_mode'] or 'off',row['facecam_region'],p['rank'],p['reason']))
     except Exception as e:
         execute('UPDATE videos SET status=?,error=? WHERE id=?',('failed',str(e)[:450],vid))
 
@@ -185,12 +255,12 @@ def root_page(_:None=Depends(auth)):
 @app.get('/api/state')
 def state(_:None=Depends(auth)):
     return {'videos':[serialize(x) for x in execute('SELECT v.id,v.name,v.source,v.status,v.duration,v.error,v.created,v.aspect_ratio,v.facecam_mode,v.facecam_region,t.provider AS transcript_provider,t.error AS transcript_error,CASE WHEN t.data IS NOT NULL THEN 1 ELSE 0 END AS has_transcript FROM videos v LEFT JOIN transcripts t ON t.video_id=v.id ORDER BY v.created DESC').fetchall()],
-        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region,layout FROM clips ORDER BY created DESC').fetchall()],
+        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region,layout,rank_score,rank_reason FROM clips ORDER BY created DESC').fetchall()],
         'monitors':[serialize(x) for x in execute('SELECT id,label,platform,status,error,created FROM monitors ORDER BY created DESC').fetchall()]}
 
 @app.get('/api/capabilities')
 def capabilities(_:None=Depends(auth)):
-    return {'transcription_enabled':bool(os.getenv('TRANSCRIPTION_API_KEY','').strip()),'live_enabled':os.getenv('ENABLE_LIVE_MONITOR','false').lower()=='true','version':'2.0'}
+    return {'transcription_enabled':bool(os.getenv('TRANSCRIPTION_API_KEY','').strip()),'live_enabled':os.getenv('ENABLE_LIVE_MONITOR','false').lower()=='true','version':'4.0'}
 
 @app.get('/api/videos/{vid}/transcript')
 def transcript_data(vid:str,_:None=Depends(auth)):
@@ -288,6 +358,7 @@ def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
         if (not transcript or not transcript['data']) and not clip['caption_edits']:
             raise HTTPException(409,'No transcript or manually entered subtitles. Add subtitles in the editor before exporting.')
     layout=validate_layout(p.layout,clip) if p.layout is not None else (clip['layout'] or None)
+    thumbnail_path(cid).unlink(missing_ok=True)
     execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,layout=?,status=?,path=NULL WHERE id=?',
         (p.title,p.start,p.end,p.caption_style,json.dumps(layout) if isinstance(layout,dict) else layout,'review',cid))
     return {'ok':True}
@@ -465,6 +536,7 @@ def delete_clip(cid:str,_:None=Depends(auth)):
     clip=get_clip(cid)
     if clip['status']=='rendering':raise HTTPException(409,'Rendering in progress')
     if clip['path']:Path(clip['path']).unlink(missing_ok=True)
+    thumbnail_path(cid).unlink(missing_ok=True)
     execute('DELETE FROM clips WHERE id=?',(cid,))
     return {'ok':True}
 
