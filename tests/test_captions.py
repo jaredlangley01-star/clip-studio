@@ -82,7 +82,7 @@ class CaptionEditorTests(unittest.TestCase):
         with patch.object(main,'process_video',lambda *args: None):
             result=asyncio.run(main.upload(file=file,highlight_count=4,clip_length=35,
                 aspect_ratio='9:16',has_facecam=True,
-                facecam_region=json.dumps({'x':0.70,'y':0.08,'w':0.28,'h':0.36}),_=None))
+                facecam_region=json.dumps({'x':0.70,'y':0.08,'w':0.28,'h':0.36}),platform_source='',platform_item_id='',_=None))
         video=main.execute('SELECT * FROM videos WHERE id=?',(result['id'],)).fetchone()
         self.assertEqual(video['aspect_ratio'],'9:16')
         self.assertEqual(video['facecam_mode'],'manual')
