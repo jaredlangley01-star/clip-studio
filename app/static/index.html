@@ -44,7 +44,12 @@ async function disconnectPlatform(platform){
  if(!confirm('Disconnect '+platform+' from Clip Studio?'))return;
  try{
   await api('/platforms/'+platform,{method:'DELETE'});
-  await loadPlatforms();$('platformVideos').replaceChildren();$('platformNotice').textContent='Disconnected.'
+  await loadPlatforms();
+const oauthResult=new URLSearchParams(location.search).get('connected');
+if(oauthResult==='youtube'||oauthResult==='twitch'){
+ tab('platforms');toast((oauthResult==='youtube'?'YouTube':'Twitch')+' account connected');
+ history.replaceState(null,'',location.pathname);
+}$('platformVideos').replaceChildren();$('platformNotice').textContent='Disconnected.'
  }catch(e){toast(e.message)}
 }
 async function loadPlatformVideos(platform){
