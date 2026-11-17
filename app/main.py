@@ -88,10 +88,10 @@ def transcribe(path):
     if not key:return None,'Speech analysis is not configured'
     url=os.getenv('TRANSCRIPTION_API_URL','https://api.groq.com/openai/v1/audio/transcriptions')
     if not url.startswith('https://'):return None,'HTTPS transcription endpoint required'
-    wave=ROOT/'uploads'/(uid()+'.wav')
+    wave=ROOT/'uploads'/(uid()+'.mp3')
     try:
-        cmd(['ffmpeg','-y','-nostdin','-v','error','-i',str(path),'-vn','-ac','1','-ar','16000','-c:a','pcm_s16le',str(wave)],timeout=240)
-        if wave.stat().st_size>20*1024*1024:return None,'Transcription audio exceeds 20 MB'
+        cmd(['ffmpeg','-y','-nostdin','-v','error','-i',str(path),'-vn','-ac','1','-ar','16000','-c:a','libmp3lame','-b:a','48k',str(wave)],timeout=240)
+        if wave.stat().st_size>20*1024*1024:return None,'Compressed audio exceeds 20 MB. Try a shorter recording.'
         boundary='----ClipStudio'+uid()
         def part(name,value,filename=None,content_type='text/plain'):
             head=f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
@@ -100,15 +100,19 @@ def transcribe(path):
         body=(part('model',os.getenv('TRANSCRIPTION_MODEL','whisper-large-v3-turbo').encode())+
               part('response_format',b'verbose_json')+
               part('timestamp_granularities[]',b'word')+
-              part('file',wave.read_bytes(),'audio.wav','audio/wav')+
+              part('file',wave.read_bytes(),'audio.mp3','audio/mpeg')+
               f'--{boundary}--\r\n'.encode())
         req=urllib.request.Request(url,data=body,headers={'Authorization':'Bearer '+key,'Content-Type':'multipart/form-data; boundary='+boundary},method='POST')
         with urllib.request.urlopen(req,timeout=180) as response:result=json.load(response)
         words=result.get('words') or []
         if not words:words=[{'start':v['start'],'end':v['end'],'word':v.get('text','')} for v in result.get('segments',[])]
+        if not words:return None,'Transcription response contained no timestamped speech. Verify the audio contains speech.'
         return {'text':result.get('text',''),'words':words},None
+    except urllib.error.HTTPError as exc:
+        detail=exc.read(600).decode('utf-8','replace')
+        return None,f'Transcription API HTTP {exc.code}: {detail[:350]}'
     except Exception as exc:
-        return None,('Transcription failed: '+str(exc))[:250]
+        return None,('Transcription failed: '+str(exc))[:400]
     finally:
         wave.unlink(missing_ok=True)
 
@@ -171,7 +175,7 @@ def root_page(_:None=Depends(auth)):
 
 @app.get('/api/state')
 def state(_:None=Depends(auth)):
-    return {'videos':[serialize(x) for x in execute('SELECT id,name,source,status,duration,error,created FROM videos ORDER BY created DESC').fetchall()],
+    return {'videos':[serialize(x) for x in execute('SELECT v.id,v.name,v.source,v.status,v.duration,v.error,v.created,t.provider AS transcript_provider,t.error AS transcript_error,CASE WHEN t.data IS NOT NULL THEN 1 ELSE 0 END AS has_transcript FROM videos v LEFT JOIN transcripts t ON t.video_id=v.id ORDER BY v.created DESC').fetchall()],
         'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason FROM clips ORDER BY created DESC').fetchall()],
         'monitors':[serialize(x) for x in execute('SELECT id,label,platform,status,error,created FROM monitors ORDER BY created DESC').fetchall()]}
 
@@ -206,6 +210,20 @@ async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_leng
     execute('INSERT INTO videos VALUES(?,?,?,?,?,?,?,?)',(vid,name,'upload','processing',str(dest),None,None,utc()))
     threading.Thread(target=process_video,args=(vid,highlight_count,clip_length),daemon=True).start()
     return {'id':vid,'status':'processing'}
+
+@app.post('/api/videos/{vid}/reanalyze')
+def reanalyze(vid:str,highlight_count:int=8,clip_length:int=35,_:None=Depends(auth)):
+    if not 1<=highlight_count<=12 or not 10<=clip_length<=90:raise HTTPException(400,'Invalid highlight settings')
+    video=execute('SELECT * FROM videos WHERE id=?',(vid,)).fetchone()
+    if not video:raise HTTPException(404,'Video not found')
+    if not Path(video['path']).exists():raise HTTPException(404,'Original recording is no longer available on temporary storage')
+    if video['status']=='processing':raise HTTPException(409,'Analysis already underway')
+    with lock:
+        with db() as c:
+            c.execute("DELETE FROM clips WHERE video_id=? AND status IN ('review','render_failed')",(vid,))
+            c.execute('UPDATE videos SET status=?,error=NULL WHERE id=?',('processing',vid))
+    threading.Thread(target=process_video,args=(vid,highlight_count,clip_length),daemon=True).start()
+    return {'status':'processing'}
 
 @app.get('/api/video/{vid}/stream')
 def video_stream(vid:str,request:Request,_:None=Depends(auth)):
@@ -248,6 +266,11 @@ def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
     if p.end<=p.start or p.end-p.start>180 or (row['duration'] is not None and p.end>row['duration']+0.01):
         raise HTTPException(400,'Choose a valid range of up to 180 seconds within the video')
     if p.caption_style not in ('none','bold','minimal'):raise HTTPException(400,'Invalid subtitle style')
+    if p.caption_style!='none':
+        transcript=execute('SELECT data,error FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone()
+        if not transcript or not transcript['data']:
+            detail=(transcript['error'] if transcript else None) or 'No transcript is available.'
+            raise HTTPException(409,'Cannot add subtitles: '+detail+' Reanalyze the video after fixing transcription.')
     execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,status=?,path=NULL WHERE id=?',(p.title,p.start,p.end,p.caption_style,'review',cid))
     return {'ok':True}
 
@@ -290,9 +313,10 @@ def render_job(cid):
         cmd(['ffmpeg','-y','-nostdin','-v','error','-ss',str(clip['start']),'-i',video['path'],'-t',str(clip['end']-clip['start']),'-filter_complex',filtergraph,'-map',video_map,'-map','0:a:0?','-c:v','libx264','-preset','veryfast','-crf','24','-r','30','-c:a','aac','-b:a','128k','-movflags','+faststart',str(tmp)],timeout=900)
         os.replace(tmp,output)
         execute('UPDATE clips SET path=?,status=? WHERE id=?',(str(output),'exported',cid))
-    except Exception:
+    except Exception as exc:
         tmp.unlink(missing_ok=True)
         execute('UPDATE clips SET status=? WHERE id=?',('render_failed',cid))
+        print('Clip export failed:',str(exc)[:600],flush=True)
 
 @app.post('/api/clips/{cid}/approve')
 def approve(cid:str,_:None=Depends(auth)):
