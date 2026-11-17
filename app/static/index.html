@@ -20,10 +20,55 @@ document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>tab(n.dataset.tab));
 const fmt=s=>Number.isFinite(Number(s))?`${Math.floor(s/60)}:${('0'+Math.floor(s%60)).slice(-2)}`:'—';
 function render(){let v=current.videos,c=current.clips,m=current.monitors;$('videoCount').textContent=v.length;$('reviewCount').textContent=c.filter(x=>x.status==='review').length;$('exportCount').textContent=c.filter(x=>x.status==='exported').length;
 $('videoRows').innerHTML=v.map(x=>`<tr><td>${escapeHTML(x.name)}</td><td>${escapeHTML(x.source)}</td><td>${fmt(x.duration)}</td><td><span class="status">${escapeHTML(x.status)}</span>${x.error?`<div class="small muted">${escapeHTML(x.error)}</div>`:''}${x.status==='ready'?`<div class="small muted" style="margin-top:8px">${x.has_transcript?'✅ Transcript ready':`⚠ ${escapeHTML(x.transcript_error||'Audio-only: no transcript')}`}</div><button class="secondary" style="margin-top:8px" onclick="reanalyze('${x.id}')">Reanalyze</button>`:''}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">No recordings yet.</td></tr>';
-const makeCard=x=>`<div class="clip"><h3>${escapeHTML(x.title)}</h3><div class="muted small">${escapeHTML(v.find(y=>y.id===x.video_id)?.name||'Video')}</div><p class="small">${fmt(x.start)} – ${fmt(x.end)} · ${Math.round((x.end-x.start))}s</p><p class="muted small">${escapeHTML(x.reason||"Audio activity")}</p><span class="status">${escapeHTML(x.status)}</span><div class="row">${x.status==='review'?`<button onclick="edit('${x.id}')">Review / Edit</button><button class="secondary" onclick="discard('${x.id}')">Discard</button>`:x.status==='exported'?`<button onclick="location.href='/api/clips/${x.id}/download'">Download MP4</button>`:'<span class="muted small">Processing…</span>'}</div></div>`;
-$('reviewGrid').innerHTML=c.filter(x=>x.status!=='exported').map(makeCard).join('')||'<div class="muted">No clips awaiting review.</div>';
+
+const canReview=x=>x.status==='review'||x.status==='render_failed';
+const validIds=new Set(c.filter(canReview).map(x=>x.id));
+selectedClipIds=new Set([...selectedClipIds].filter(id=>validIds.has(id)));
+const makeCard=x=>{
+ const checked=selectedClipIds.has(x.id);
+ return `<div class="clip m4-card"><div class="m4-thumb"><img loading="lazy" src="/api/clips/${x.id}/thumbnail" alt="Thumbnail of ${escapeHTML(x.title)}" onerror="this.style.opacity='0'">
+ ${canReview(x)?`<label class="m4-pick"><input type="checkbox" ${checked?'checked':''} onchange="toggleClipSelection('${x.id}',this.checked)"> Select</label>`:''}
+ <div class="m4-score">Selection score ${x.rank_score||0}/99</div></div>
+ <div class="m4-cardbody"><h3>${escapeHTML(x.title)}</h3>
+ <div class="muted small">${escapeHTML(v.find(y=>y.id===x.video_id)?.name||'Video')}</div>
+ <p class="small">${fmt(x.start)} – ${fmt(x.end)} · ${Math.round(x.end-x.start)}s</p>
+ <p class="muted small m4-reason">${escapeHTML(x.rank_reason||x.reason||'Audio activity')}</p>
+ <div class="row"><span class="m4-tag">${escapeHTML(x.status)}</span><span class="m4-tag">${escapeHTML(x.aspect_ratio||'9:16')}</span></div>
+ <div class="row" style="margin-top:10px">${canReview(x)?`<button onclick="edit('${x.id}')">Open Editor</button><button class="secondary" onclick="discard('${x.id}')">Discard</button>`:x.status==='exported'?`<button onclick="location.href='/api/clips/${x.id}/download'">Download MP4</button>`:`<span class="muted small">${x.status==='rendering'?'Export queued / processing':'Processing…'}</span>`}</div>
+ </div></div>`;
+};
+let reviewItems=c.filter(x=>x.status!=='exported');
+const sort=$('reviewSort').value;
+if(sort==='rank')reviewItems.sort((a,b)=>(b.rank_score||0)-(a.rank_score||0));
+if(sort==='time')reviewItems.sort((a,b)=>a.video_id.localeCompare(b.video_id)||a.start-b.start);
+if(sort==='newest')reviewItems.reverse();
+$('reviewGrid').innerHTML=reviewItems.map(makeCard).join('')||'<div class="muted">No clips awaiting review.</div>';
 $('exportGrid').innerHTML=c.filter(x=>x.status==='exported').map(makeCard).join('')||'<div class="muted">No exported clips yet.</div>';
+updateSelectionCount();
 $('monitors').innerHTML=m.map(x=>`<div class="row" style="padding:12px 0;border-bottom:1px solid #343345"><div class="grow"><b>${escapeHTML(x.label)}</b><div class="muted small">${escapeHTML(x.platform)} · ${escapeHTML(x.status)} ${x.error?'· '+escapeHTML(x.error):''}</div></div>${x.status==='running'?`<button class="danger" onclick="monAction('${x.id}','stop')">Stop</button>`:`<button onclick="monAction('${x.id}','start')">Start</button>`}</div>`).join('')||'<p class="muted">No monitors configured.</p>'}
+
+function updateSelectionCount(){
+ const available=current.clips.filter(x=>x.status==='review'||x.status==='render_failed');
+ $('selectionCount').textContent=selectedClipIds.size+' selected';
+ $('selectAllClips').checked=available.length>0&&available.every(x=>selectedClipIds.has(x.id));
+}
+function toggleClipSelection(id,checked){if(checked)selectedClipIds.add(id);else selectedClipIds.delete(id);updateSelectionCount()}
+$('selectAllClips').addEventListener('change',e=>{
+ const ids=current.clips.filter(x=>x.status==='review'||x.status==='render_failed').map(x=>x.id);
+ if(e.target.checked)ids.forEach(id=>selectedClipIds.add(id));else selectedClipIds.clear();
+ render()
+});
+$('reviewSort').addEventListener('change',render);
+async function batchApprove(){
+ const ids=[...selectedClipIds];if(!ids.length){toast('Select clips first');return}
+ if(!confirm('Queue '+ids.length+' selected clips for export? They will render one at a time.'))return;
+ try{const r=await api('/batch/clips/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});selectedClipIds.clear();toast(r.queued+' clips queued for sequential export');await refresh()}catch(e){toast(e.message)}
+}
+async function batchPreset(){
+ const ids=[...selectedClipIds];if(!ids.length){toast('Select clips first');return}
+ try{const r=await api('/clips/batch/preset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,caption_style:$('batchCaption').value})});
+ toast('Updated subtitles for '+r.updated+' clips');await refresh()}catch(e){toast(e.message)}
+}
 async function refresh(){try{current=await api('/state');render()}catch(e){toast(e.message)}}
 
 function drawCropRegion(){
