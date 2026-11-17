@@ -1,3 +1,19 @@
+# Review-first Twitch highlight workflow — safety migration
+
+**Important behavior change:** The old `POST /api/twitch/clips` endpoint has been disabled because it created a Twitch-native clip immediately and did **not** create a private Clip Studio draft. The streamer watchlist now offers **Prepare private highlights** instead of **Create Twitch clip**. This launches the existing upload-and-analysis flow for creator-authorized recording footage. It does **not** currently capture someone else's live stream, monitor all stream audio continuously, or download a Twitch VOD without rights. Previous published Twitch clips are unchanged.
+
+For an authorized source recording, choose an AI highlight target of 20, 35, 60, 90, 120 or 180 seconds. The transcript/audio-scoring analysis queues suggested segments in Review. Use the **16:9 copy** and **9:16 copy** actions to create two independent *private review* versions of one highlight. If the original footage had its facecam crop selected on 9:16 upload, the portrait copy preserves that facecam region; 16:9 uses the full widescreen composition. Open either version in the existing editor to adjust cut, captions and layout. **Approve** sends the edited version to the MP4 exporter only; no Twitch, YouTube or TikTok post is initiated.
+
+Future milestones required for the stated end-to-end goal:
+- **Hosted live ingest + AI highlight scoring:** a reliable persistent recorder/processor with lawful source footage access (ideally authorized creator/editor relationship), durable object storage, background worker and job scheduler. Public Twitch clip eligibility is not sufficient authorization to download or republish the source media.
+- **YouTube Shorts direct publishing:** expand YouTube's current read-only OAuth authorization to the `youtube.upload` scope, use `videos.insert` with explicit user confirmation and track upload states.
+- **TikTok posting:** connect TikTok account and implement its reviewed `video.upload` / `video.publish` Content Posting API workflow, creator selection and explicit approval; posting to arbitrary accounts is not possible without their authorization.
+- **Twitch publication:** Twitch-native clip publishing is a different workflow with separate editor/broadcaster permissions and Twitch's platform-controlled clip system; it does not allow arbitrary 180-second 16:9 MP4 uploads via the current clip endpoint.
+
+Twitch documentation: https://dev.twitch.tv/docs/api/reference/clips ; YouTube upload documentation: https://developers.google.com/youtube/v3/guides/uploading_a_video ; TikTok direct posting: https://developers.tiktok.com/doc/content-posting-api-get-started
+
+---
+
 # Twitch clip preview and cross-platform sharing
 
 The Platforms → **Twitch Clips I've Created** panel now resolves each requested clip through Twitch's official `Get Clips` endpoint. Twitch clip creation is asynchronous: until a clip appears in Twitch's API, its card displays **Processing**. Click **Refresh clips**, then **Preview & share** to play the actual video through Twitch's official `clips.twitch.tv/embed` player. The player automatically includes the current website hostname in the required `parent` parameter.
