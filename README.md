@@ -1,3 +1,19 @@
+# Milestone 4 — Intelligent Review & Batch Workflow
+
+Clip Studio keeps the working upload → highlight → review → export flow.
+
+- **Explainable highlight ranking:** transcription-aware hooks, reactions, questions, dialogue and audio signals produce a **0–99 internal selection score**, not a prediction of virality. Speech-derived titles and explanations appear on new clips.
+- **Optional semantic AI:** set Render environment variable `HIGHLIGHT_LLM_MODEL=openai/gpt-oss-20b` (or another currently supported Groq chat model) to use your existing `TRANSCRIPTION_API_KEY` for an additional transcript-based ranking call. This uses extra API requests, subject to the provider's pricing and rate limits. Leave it unset for heuristic-only mode. Groq failures fall back automatically.
+- **Thumbnails:** FFmpeg generates midpoint stills lazily for each clip when source footage is available.
+- **Review Queue:** rank/time sorting, multi-select, subtitle presets and batch queue for export.
+- **Editor:** larger two-column workspace and an audio waveform that you can click to seek; existing layout/subtitle timing/editing controls are preserved.
+- **Sequential exports:** one MP4 rendered at a time. The queue is in-process and **not durable** across Render restarts.
+- **No automatic publishing:** approved MP4 files remain available in Exports until temporary storage is reset.
+- **Existing uploads:** reanalyze to get new rankings and descriptions. Reanalyze replaces unapproved candidate clips; export/save important clips first.
+
+Render Free sleeps and uses temporary storage. Do not rely on it for 24/7 recording, permanent files, or durable video jobs.
+
+---
 ## Upload-time aspect ratio and face-cam crop (new)
 
 On **Videos → Upload a recording**, select the output aspect ratio (9:16, 1:1, or 16:9). For 9:16 choose whether the source contains an embedded face-cam. If yes, the uploaded footage appears in-browser; pause/seek to a clear frame and **drag a rectangle around the face-cam** before clicking **Upload & analyze**. The normalized crop and output aspect ratio are saved on the video and applied to **every highlight from that recording**, including newly generated highlights after reanalysis. Automatic face detection and per-highlight crop controls have been removed. Portrait face-cam layout places the cropped camera in the upper 40% and gameplay below it. Subtitle text/timings are still editable individually in Review Queue. 1:1 and 16:9 exports use the standard fit-with-blurred-background layout and do not use face-cam extraction.
