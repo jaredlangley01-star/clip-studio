@@ -1,0 +1,28 @@
+name: Clip Studio checks
+on:
+  push:
+    branches: [main, milestone-2-direct-fix]
+  pull_request:
+    branches: [main]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python syntax
+        run: python -m py_compile app/main.py
+      - name: Feature checks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('app/main.py').read_text()
+          h=Path('app/static/index.html').read_text()
+          for token in ('def transcribe(', 'def hybrid_picks(', 'def subtitle_file(', "highlight_count:int=Form(8)", 'def capabilities('):
+              assert token in p, token
+          for token in ('name="highlight_count"', 'name="clip_length"', 'id="editCaptionStyle"', "caption_style:$('editCaptionStyle').value"):
+              assert token in h, token
+          print('Milestone 2 source checks passed')
+          PY
