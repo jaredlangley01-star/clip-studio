@@ -1,3 +1,13 @@
+# Twitch clip preview and cross-platform sharing
+
+The Platforms → **Twitch Clips I've Created** panel now resolves each requested clip through Twitch's official `Get Clips` endpoint. Twitch clip creation is asynchronous: until a clip appears in Twitch's API, its card displays **Processing**. Click **Refresh clips**, then **Preview & share** to play the actual video through Twitch's official `clips.twitch.tv/embed` player. The player automatically includes the current website hostname in the required `parent` parameter.
+
+To publish a creator-permitted clip on YouTube Shorts or TikTok, open **Open sharing options on Twitch** from the preview, then choose the destination in Twitch's own Share menu. For other broadcasters, these destination choices only appear if that broadcaster permits cross-platform clip sharing. The user must approve the final post through Twitch; Clip Studio cannot infer permissions or silently publish. For more information: https://help.twitch.tv/articles/en_US/Knowledge/how-to-use-clips
+
+This is a functioning **preview + handoff to Twitch-native publishing**, not direct API publishing from Clip Studio. Separate YouTube videos.insert and TikTok Content Posting API integration would require additional authorization, review, and legally accessible source media. The YouTube connection currently remains read-only. No downloadable Twitch video URL is fabricated, no platform restrictions are bypassed, and no Twitch stream data is copied onto Render.
+
+---
+
 # Twitch-first Streamer Discovery and Native Clips
 
 Clip Studio now supports researching **other Twitch broadcasters** in the Platforms page. Search for a username, add a channel to your watchlist, refresh current live status, inspect existing public Twitch clips, and create a Twitch-native clip of a **currently live** watched broadcaster when the broadcaster's clip settings permit it.
