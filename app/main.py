@@ -41,6 +41,7 @@ def init():
         cols=[r[1] for r in c.execute('PRAGMA table_info(clips)')]
         if 'caption_style' not in cols:c.execute("ALTER TABLE clips ADD COLUMN caption_style TEXT DEFAULT 'none'")
         if 'reason' not in cols:c.execute("ALTER TABLE clips ADD COLUMN reason TEXT DEFAULT 'Audio activity'")
+        if 'caption_edits' not in cols:c.execute("ALTER TABLE clips ADD COLUMN caption_edits TEXT")
 init()
 
 def utc():return datetime.now(timezone.utc).isoformat()
@@ -274,28 +275,76 @@ def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
     execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,status=?,path=NULL WHERE id=?',(p.title,p.start,p.end,p.caption_style,'review',cid))
     return {'ok':True}
 
+def generated_captions(clip):
+    row=execute('SELECT data FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone()
+    if not row or not row['data']:return []
+    words=json.loads(row['data']).get('words') or []
+    selected=[w for w in words if float(w.get('end',0))>clip['start'] and float(w.get('start',0))<clip['end']]
+    chunks=[]
+    step=5
+    for index in range(0,len(selected),step):
+        part=selected[index:index+step]
+        start=max(clip['start'],float(part[0].get('start',clip['start'])))
+        end=min(clip['end'],float(part[-1].get('end',start+0.5)))
+        if end<=start:continue
+        line=' '.join(str(w.get('word',w.get('text',''))).strip() for w in part).strip()
+        if line:chunks.append({'start':round(start,3),'end':round(end,3),'text':line})
+    return chunks
+
+def captions_for_clip(clip):
+    if clip['caption_edits']:
+        return json.loads(clip['caption_edits'])
+    return generated_captions(clip)
+
+@app.get('/api/clips/{cid}/captions')
+def get_captions(cid:str,_:None=Depends(auth)):
+    clip=get_clip(cid)
+    return {'captions':captions_for_clip(clip),'edited':bool(clip['caption_edits'])}
+
+class CaptionSegment(BaseModel):
+    start:float=Field(ge=0)
+    end:float=Field(gt=0)
+    text:str=Field(min_length=1,max_length=400)
+
+class CaptionChanges(BaseModel):
+    captions:list[CaptionSegment]=Field(max_length=500)
+
+@app.put('/api/clips/{cid}/captions')
+def update_captions(cid:str,p:CaptionChanges,_:None=Depends(auth)):
+    clip=get_clip(cid)
+    if clip['status']=='rendering':raise HTTPException(409,'Cannot edit captions while exporting')
+    if not execute('SELECT data FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone():
+        raise HTTPException(409,'No transcription exists')
+    previous_end=clip['start']
+    payload=[]
+    for segment in p.captions:
+        if segment.start<clip['start']-0.02 or segment.end>clip['end']+0.02 or segment.end<=segment.start or segment.start<previous_end-0.02:
+            raise HTTPException(400,'Caption timestamps must be ordered and inside the highlight')
+        payload.append({'start':round(segment.start,3),'end':round(segment.end,3),'text':segment.text.strip()})
+        previous_end=segment.end
+    if not payload:raise HTTPException(400,'At least one caption is required')
+    execute('UPDATE clips SET caption_edits=?,path=NULL,status=? WHERE id=?',(json.dumps(payload,ensure_ascii=False),'review',cid))
+    return {'saved':True,'count':len(payload)}
+
 def srt_clock(seconds):
     ms=max(0,round(seconds*1000));h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
     return f'{h:02}:{m:02}:{s:02},{ms:03}'
 
 def subtitle_file(clip):
     if clip['caption_style']=='none':return None
-    row=execute('SELECT data FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone()
-    if not row or not row['data']:return None
-    words=json.loads(row['data']).get('words') or []
-    selected=[w for w in words if float(w.get('end',0))>clip['start'] and float(w.get('start',0))<clip['end']]
-    if not selected:return None
-    chunks=[];step=5 if clip['caption_style']=='bold' else 9
-    for index in range(0,len(selected),step):
-        part=selected[index:index+step]
-        a=max(0,float(part[0].get('start',0))-clip['start'])
-        b=min(clip['end']-clip['start'],float(part[-1].get('end',a+1))-clip['start'])
+    captions=captions_for_clip(clip)
+    if not captions:return None
+    chunks=[]
+    for item in captions:
+        a=max(0,float(item['start'])-clip['start'])
+        b=min(clip['end']-clip['start'],float(item['end'])-clip['start'])
         if b<=a:continue
-        line=' '.join(str(w.get('word',w.get('text',''))).strip() for w in part).replace('<','').replace('>','').replace('{','').replace('}','')
+        line=str(item['text']).replace('<','').replace('>','').replace('{','').replace('}','').replace('\n',' ')
         if clip['caption_style']=='bold':line=line.upper()
-        chunks.append(f'{len(chunks)+1}\n{srt_clock(a)} --> {srt_clock(b)}\n{line}\n')
+        chunks.append(f"{len(chunks)+1}\n{srt_clock(a)} --> {srt_clock(b)}\n{line}\n")
     if not chunks:return None
-    path=ROOT/'clips'/(clip['id']+'.srt');path.write_text('\n'.join(chunks),encoding='utf-8')
+    path=ROOT/'clips'/(clip['id']+'.srt')
+    path.write_text('\n'.join(chunks),encoding='utf-8')
     return path
 
 def render_job(cid):
