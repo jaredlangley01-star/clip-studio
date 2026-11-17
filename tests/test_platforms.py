@@ -48,7 +48,8 @@ class PlatformTests(unittest.TestCase):
             raise AssertionError(url)
         with patch.object(main,'exchange_json',side_effect=exchange):
             result=main.platform_callback('twitch',state=state,code='authorization-code')
-        self.assertEqual(result.status_code,200)
+        self.assertEqual(result.status_code,303)
+        self.assertIn('connected=twitch',result.headers['location'])
         row=main.execute('SELECT * FROM platform_accounts WHERE platform=?',('twitch',)).fetchone()
         self.assertNotIn('my-secret-token',row['token_cipher'])
         self.assertNotIn('refresh-secret',row['refresh_cipher'])
