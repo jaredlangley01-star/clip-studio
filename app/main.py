@@ -1,10 +1,10 @@
 import os, re, json, time, uuid, sqlite3, secrets, subprocess, threading, math, shutil, urllib.request, queue, hashlib
 from pathlib import Path
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 ROOT=Path(os.environ.get('DATA_DIR','/tmp/clip-studio')).resolve()
@@ -55,6 +55,8 @@ def init():
         if 'caption_theme' not in cols:c.execute("ALTER TABLE clips ADD COLUMN caption_theme TEXT")
         c.execute('CREATE TABLE IF NOT EXISTS font_library(id TEXT PRIMARY KEY,family TEXT NOT NULL,filename TEXT NOT NULL,created TEXT)')
         c.execute('CREATE TABLE IF NOT EXISTS caption_presets(id TEXT PRIMARY KEY,name TEXT NOT NULL,theme TEXT NOT NULL,created TEXT)')
+        c.execute('CREATE TABLE IF NOT EXISTS platform_accounts(platform TEXT PRIMARY KEY,account_id TEXT NOT NULL,account_name TEXT NOT NULL,token_cipher TEXT NOT NULL,refresh_cipher TEXT,expires_at REAL,connected_at TEXT NOT NULL)')
+        c.execute('CREATE TABLE IF NOT EXISTS oauth_pending(state TEXT PRIMARY KEY,platform TEXT NOT NULL,expires_at REAL NOT NULL)')
 init()
 
 def utc():return datetime.now(timezone.utc).isoformat()
@@ -310,6 +312,190 @@ def state(_:None=Depends(auth)):
 @app.get('/api/capabilities')
 def capabilities(_:None=Depends(auth)):
     return {'transcription_enabled':bool(os.getenv('TRANSCRIPTION_API_KEY','').strip()),'live_enabled':os.getenv('ENABLE_LIVE_MONITOR','false').lower()=='true','semantic_ranking_enabled':bool(os.getenv('HIGHLIGHT_LLM_MODEL','').strip()),'version':'4.0'}
+
+
+# Platform integration v1: read-only OAuth account discovery.
+# No video downloading, scraping, capture, chat monitoring or auto-posting.
+PLATFORM_HOST='https://clip-studio-t7r6.onrender.com'
+def platform_origin():
+    origin=os.getenv('PUBLIC_BASE_URL',PLATFORM_HOST).rstrip('/')
+    if not origin.startswith('https://') or urlsplit(origin).hostname is None:
+        raise HTTPException(503,'PUBLIC_BASE_URL must be an HTTPS origin')
+    return origin
+
+def platform_config(platform):
+    if platform not in ('youtube','twitch'):raise HTTPException(404,'Unknown platform')
+    prefix='YOUTUBE' if platform=='youtube' else 'TWITCH'
+    cid=os.getenv(prefix+'_CLIENT_ID','').strip()
+    secret=os.getenv(prefix+'_CLIENT_SECRET','').strip()
+    return cid,secret
+
+def oauth_cipher():
+    key=os.getenv('OAUTH_ENCRYPTION_KEY','').strip()
+    if not key:raise HTTPException(503,'Set OAUTH_ENCRYPTION_KEY before connecting accounts')
+    try:
+        from cryptography.fernet import Fernet
+        return Fernet(key.encode('ascii'))
+    except Exception:
+        raise HTTPException(503,'OAUTH_ENCRYPTION_KEY must be a valid Fernet key')
+
+def platform_ready(platform):
+    cid,secret=platform_config(platform)
+    return bool(cid and secret and os.getenv('OAUTH_ENCRYPTION_KEY','').strip())
+
+def exchange_json(url,form=None,headers=None):
+    if not url.startswith('https://'):raise RuntimeError('HTTPS required for provider requests')
+    data=urlencode(form).encode('utf8') if form is not None else None
+    req=urllib.request.Request(url,data=data,headers={'Accept':'application/json','User-Agent':'ClipStudio/5.0',**(headers or {})},
+                               method='POST' if form is not None else 'GET')
+    try:
+        with urllib.request.urlopen(req,timeout=25) as resp:return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(502,'Platform API HTTP '+str(exc.code)) from exc
+    except Exception as exc:
+        raise HTTPException(502,'Platform is currently unreachable') from exc
+
+def oauth_tokens(platform,code):
+    client_id,client_secret=platform_config(platform)
+    redirect=platform_origin()+'/api/platforms/'+platform+'/callback'
+    if platform=='youtube':
+        return exchange_json('https://oauth2.googleapis.com/token',{
+            'code':code,'client_id':client_id,'client_secret':client_secret,
+            'redirect_uri':redirect,'grant_type':'authorization_code'})
+    return exchange_json('https://id.twitch.tv/oauth2/token',{
+        'client_id':client_id,'client_secret':client_secret,'code':code,
+        'grant_type':'authorization_code','redirect_uri':redirect})
+
+def save_platform_account(platform,token,identity):
+    f=oauth_cipher()
+    access=token.get('access_token')
+    if not isinstance(access,str) or not access:raise HTTPException(502,'Missing access token from provider')
+    refresh=token.get('refresh_token')
+    expires=time.time()+int(token.get('expires_in',3600))-90
+    execute('INSERT INTO platform_accounts(platform,account_id,account_name,token_cipher,refresh_cipher,expires_at,connected_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform) DO UPDATE SET account_id=excluded.account_id,account_name=excluded.account_name,token_cipher=excluded.token_cipher,refresh_cipher=excluded.refresh_cipher,expires_at=excluded.expires_at,connected_at=excluded.connected_at',
+        (platform,str(identity['id']),str(identity['name'])[:120],f.encrypt(access.encode()).decode(),
+         f.encrypt(refresh.encode()).decode() if refresh else None,expires,utc()))
+
+def platform_access(platform):
+    row=execute('SELECT * FROM platform_accounts WHERE platform=?',(platform,)).fetchone()
+    if not row:raise HTTPException(409,'Connect your '+platform+' account first')
+    cipher=oauth_cipher()
+    try:
+        token=cipher.decrypt(row['token_cipher'].encode()).decode()
+    except Exception:
+        raise HTTPException(409,'Account credentials could not be decrypted; reconnect the account')
+    if (row['expires_at'] or 0)>time.time():return token,row
+    if not row['refresh_cipher']:raise HTTPException(409,'Account authorization has expired; reconnect')
+    try:
+        refresh=cipher.decrypt(row['refresh_cipher'].encode()).decode()
+    except Exception:raise HTTPException(409,'Refresh authorization lost; reconnect')
+    cid,secret=platform_config(platform)
+    if platform=='youtube':
+        res=exchange_json('https://oauth2.googleapis.com/token',{
+            'client_id':cid,'client_secret':secret,'refresh_token':refresh,'grant_type':'refresh_token'})
+    else:
+        res=exchange_json('https://id.twitch.tv/oauth2/token',{
+            'client_id':cid,'client_secret':secret,'refresh_token':refresh,'grant_type':'refresh_token'})
+    new_token=res.get('access_token')
+    if not new_token:raise HTTPException(409,'Unable to renew the connection; reconnect')
+    new_refresh=res.get('refresh_token') or refresh
+    expiry=time.time()+int(res.get('expires_in',3600))-90
+    execute('UPDATE platform_accounts SET token_cipher=?,refresh_cipher=?,expires_at=? WHERE platform=?',
+        (cipher.encrypt(new_token.encode()).decode(),cipher.encrypt(new_refresh.encode()).decode(),expiry,platform))
+    return new_token,execute('SELECT * FROM platform_accounts WHERE platform=?',(platform,)).fetchone()
+
+@app.get('/api/platforms')
+def platform_status(_:None=Depends(auth)):
+    accounts={r['platform']:r for r in execute('SELECT platform,account_name,account_id,connected_at FROM platform_accounts').fetchall()}
+    return [{'platform':p,'configured':platform_ready(p),'connected':p in accounts,
+         'account_name':accounts[p]['account_name'] if p in accounts else None,
+         'connected_at':accounts[p]['connected_at'] if p in accounts else None}
+         for p in ('youtube','twitch')]
+
+@app.get('/api/platforms/{platform}/connect')
+def platform_connect(platform:str,_:None=Depends(auth)):
+    if not platform_ready(platform):
+        raise HTTPException(503,'Set client ID, client secret, and OAUTH_ENCRYPTION_KEY in Render first')
+    cid,_=platform_config(platform)
+    state=secrets.token_urlsafe(32)
+    execute('DELETE FROM oauth_pending WHERE expires_at<?',(time.time(),))
+    execute('INSERT INTO oauth_pending(state,platform,expires_at) VALUES(?,?,?)',(state,platform,time.time()+600))
+    redirect=platform_origin()+'/api/platforms/'+platform+'/callback'
+    if platform=='youtube':
+        params={'client_id':cid,'redirect_uri':redirect,'response_type':'code',
+             'scope':'https://www.googleapis.com/auth/youtube.readonly',
+             'access_type':'offline','prompt':'consent','state':state}
+        url='https://accounts.google.com/o/oauth2/v2/auth?'+urlencode(params)
+    else:
+        params={'client_id':cid,'redirect_uri':redirect,'response_type':'code','state':state,
+                'scope':''}
+        url='https://id.twitch.tv/oauth2/authorize?'+urlencode(params)
+    return {'authorization_url':url}
+
+@app.get('/api/platforms/{platform}/callback')
+def platform_callback(platform:str,state:str='',code:str='',error:str=''):
+    row=execute('SELECT platform,expires_at FROM oauth_pending WHERE state=?',(state,)).fetchone()
+    execute('DELETE FROM oauth_pending WHERE state=?',(state,))
+    if not row or row['platform']!=platform or row['expires_at']<time.time():
+        raise HTTPException(400,'Invalid or expired connection request; start again in Clip Studio')
+    if error or not code:raise HTTPException(400,'Authorization declined or incomplete')
+    result=oauth_tokens(platform,code)
+    access=result.get('access_token')
+    if not access:raise HTTPException(502,'OAuth access token was not received')
+    if platform=='youtube':
+        data=exchange_json('https://www.googleapis.com/youtube/v3/channels?'+urlencode({'part':'snippet','mine':'true','maxResults':1}),
+                      headers={'Authorization':'Bearer '+access})
+        channel=(data.get('items') or [None])[0]
+        if not channel:raise HTTPException(409,'This Google account has no accessible YouTube channel')
+        identity={'id':channel['id'],'name':channel['snippet']['title']}
+    else:
+        cid,_=platform_config(platform)
+        data=exchange_json('https://api.twitch.tv/helix/users',headers={'Authorization':'Bearer '+access,'Client-Id':cid})
+        account=(data.get('data') or [None])[0]
+        if not account:raise HTTPException(409,'This Twitch token has no accessible user')
+        identity={'id':account['id'],'name':account['display_name']}
+    save_platform_account(platform,result,identity)
+    return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>Connected</title></head><body style="font-family:system-ui;background:#12111e;color:white;padding:40px"><h2>Account connected successfully</h2><p>You can close this tab and return to Clip Studio → Platforms.</p></body></html>')
+
+@app.delete('/api/platforms/{platform}')
+def disconnect_platform(platform:str,_:None=Depends(auth)):
+    if platform not in ('youtube','twitch'):raise HTTPException(404,'Unknown platform')
+    execute('DELETE FROM platform_accounts WHERE platform=?',(platform,))
+    return {'disconnected':True}
+
+@app.get('/api/platforms/{platform}/videos')
+def platform_videos(platform:str,_:None=Depends(auth)):
+    token,account=platform_access(platform)
+    if platform=='youtube':
+        base='https://www.googleapis.com/youtube/v3/'
+        headers={'Authorization':'Bearer '+token}
+        channels=exchange_json(base+'channels?'+urlencode({'part':'contentDetails','mine':'true','maxResults':1}),headers=headers)
+        channel=(channels.get('items') or [None])[0]
+        if not channel:raise HTTPException(404,'YouTube channel could not be loaded')
+        playlist=channel['contentDetails']['relatedPlaylists']['uploads']
+        response=exchange_json(base+'playlistItems?'+urlencode({'part':'snippet,contentDetails','playlistId':playlist,'maxResults':20}),headers=headers)
+        videos=[]
+        for item in response.get('items',[]):
+            sn=item.get('snippet') or {};vid=(item.get('contentDetails') or {}).get('videoId')
+            if not vid:continue
+            videos.append({'id':vid,'title':sn.get('title','Untitled'),'published':sn.get('publishedAt'),
+                 'thumbnail':(sn.get('thumbnails') or {}).get('medium',{}).get('url'),
+                 'url':'https://www.youtube.com/watch?v='+vid,'type':'recording'})
+        live=exchange_json(base+'liveBroadcasts?'+urlencode({'part':'id,snippet,status','mine':'true','broadcastStatus':'active','maxResults':10}),headers=headers)
+        live_items=[{'id':v['id'],'title':v.get('snippet',{}).get('title','Live broadcast'),
+            'published':v.get('snippet',{}).get('actualStartTime'), 'thumbnail':None,
+            'url':'https://www.youtube.com/watch?v='+v['id'],'type':'live'} for v in live.get('items',[])]
+        return {'platform':platform,'videos':live_items+videos,'note':'Official YouTube APIs provide metadata, not downloadable media files. Use your own original MP4 in Clip Studio.'}
+    client_id,_=platform_config(platform)
+    headers={'Authorization':'Bearer '+token,'Client-Id':client_id}
+    response=exchange_json('https://api.twitch.tv/helix/videos?'+urlencode({'user_id':account['account_id'],'first':20,'type':'archive'}),headers=headers)
+    stream=exchange_json('https://api.twitch.tv/helix/streams?'+urlencode({'user_id':account['account_id'],'first':1}),headers=headers)
+    live=[{'id':v['id'],'title':v.get('title','Live stream'),'published':v.get('started_at'),'thumbnail':None,
+         'url':'https://www.twitch.tv/'+v.get('user_login',''),'type':'live'} for v in stream.get('data',[])]
+    vids=[{'id':v['id'],'title':v.get('title','Untitled'),'published':v.get('created_at'),
+           'thumbnail':(v.get('thumbnail_url') or '').replace('%{width}','320').replace('%{height}','180'),
+           'url':v.get('url'),'type':'recording'} for v in response.get('data',[])]
+    return {'platform':platform,'videos':live+vids,'note':'Twitch VOD metadata is available. Download your own recording through Twitch Video Producer, then upload it to Clip Studio.'}
 
 @app.get('/api/videos/{vid}/transcript')
 def transcript_data(vid:str,_:None=Depends(auth)):
