@@ -12,6 +12,7 @@
 <section id="exports" class="hidden"><h2>Approved exports</h2><div id="exportGrid" class="clips"></div></section>
 </main></div><div class="modal hidden" id="modal"><div class="dialog"><div class="row" style="justify-content:space-between"><h2>Review Highlight</h2><button class="secondary" onclick="closeEditor()">✕ Close</button></div><div class="m4-workspace"><div class="m4-editorbody"><div id="ratioPreview" class="ratio-preview layout-stage" data-ratio="9:16"><canvas id="layoutCanvas" width="540" height="960" aria-label="Drag the face-cam or gameplay to reposition it"></canvas><canvas id="facecamPreview" class="facecam-preview" width="540" height="384"></canvas><div class="caption-player"><video id="preview" controls preload="metadata"></video><div id="captionOverlay" class="caption-overlay hidden"></div></div></div><div class="layout-player"><button type="button" class="secondary" id="layoutPlay" onclick="toggleLayoutPlayback()">▶ Play</button><input id="layoutSeek" aria-label="Seek through clip" type="range" min="0" max="100" value="0" step="0.1"><span id="layoutTime" class="small muted">0:00</span></div><div class="m4-waveform"><div class="m4-previewtab">Audio waveform · click to seek within the highlight</div><canvas id="audioWave" width="800" height="65" title="Seek on waveform"></canvas><div class="m4-editorlayoutnote" id="waveformHint">Loading waveform…</div></div><div class="caption-preview-note">Drag video to reposition the face-cam or gameplay. Zoom and split settings remain available. Review subtitles before export.</div></div><div class="m4-editorcontrols"><label>Title</label><input id="editTitle"><div class="editor-grid"><div><label>Start (seconds)</label><input id="editStart" type="number" min="0" step="0.1"></div><div><label>End (seconds)</label><input id="editEnd" type="number" min="0" step="0.1"></div></div><div id="layoutControls" class="layout-controls hidden"><div class="row" style="justify-content:space-between"><h3>Video layout</h3><button class="secondary" type="button" onclick="resetLayout()">Reset layout</button></div><p class="muted">Choose which panel to move by dragging directly on the preview, or use the sliders for fine adjustments.</p><label for="layoutSplit">Face-cam height <span id="layoutSplitLabel">40%</span></label><input id="layoutSplit" type="range" min="25" max="65" step="1" value="40"><div class="layout-fields"><div class="layout-group"><h3>Face-cam</h3><label>Zoom <span id="camZoomLabel">1.00×</span></label><input id="camZoom" type="range" min="1" max="3" step="0.05" value="1"><label>Horizontal position</label><input id="camX" type="range" min="-100" max="100" step="1" value="0"><label>Vertical position</label><input id="camY" type="range" min="-100" max="100" step="1" value="0"></div><div class="layout-group"><h3>Gameplay</h3><label>Zoom <span id="gameZoomLabel">1.00×</span></label><input id="gameZoom" type="range" min="1" max="3" step="0.05" value="1"><label>Horizontal position</label><input id="gameX" type="range" min="-100" max="100" step="1" value="0"><label>Vertical position</label><input id="gameY" type="range" min="-100" max="100" step="1" value="0"></div></div><div class="row" style="margin-top:12px"><button type="button" class="secondary" onclick="applyLayoutAll()">Apply layout to all highlights from this video</button></div><p class="muted">Saved per highlight by default; Apply to all updates only unapproved clips.</p></div><input type="hidden" id="editRatio" value="9:16"><input type="hidden" id="facecamMode" value="off"><div class="subtitle-tabs"><button type="button" id="subTabText" class="active" onclick="showSubtitleTab('text')">Subtitle Text</button><button type="button" id="subTabDesign" onclick="showSubtitleTab('design')">Style Designer</button><button type="button" id="subTabFonts" onclick="showSubtitleTab('fonts')">Font Library</button></div><div id="subtitleTextPanel"><label for="editCaptionStyle">Subtitle style</label><select id="editCaptionStyle"><option value="none">No subtitles</option><option value="bold">Bold uppercase</option><option value="minimal">Minimal</option><option value="custom">Custom design</option></select></div><div id="subtitleDesignPanel" class="subtitle-panel hidden"><h3>Subtitle appearance</h3><div class="subtitle-preview" id="captionStylePreview"><canvas id="captionStyleFrame" width="540" height="960"></canvas><div id="captionStyleSample" class="subtitle-preview-text">YOUR CUSTOM SUBTITLE</div></div><p class="subtitle-note">Preview of the selected video frame. Export uses FFmpeg's font rendering, so minor differences are possible.</p><div class="subtitle-form-grid"><div><label for="styleFont">Font family</label><select id="styleFont"></select></div><div><label for="styleSize">Font size <span id="styleSizeLabel">46</span></label><input id="styleSize" type="range" min="16" max="100" step="1" value="46"></div><div><label for="styleColor">Text colour</label><input id="styleColor" type="color" value="#ffffff"></div><div><label for="styleStrokeColor">Stroke colour</label><input id="styleStrokeColor" type="color" value="#000000"></div><div><label for="styleStroke">Stroke thickness <span id="styleStrokeLabel">3</span></label><input id="styleStroke" type="range" min="0" max="8" step=".5" value="3"></div><div><label for="styleOpacity">Opacity <span id="styleOpacityLabel">100%</span></label><input id="styleOpacity" type="range" min="10" max="100" step="5" value="100"></div><div><label for="stylePosition">Bottom margin <span id="stylePositionLabel">12%</span></label><input id="stylePosition" type="range" min="5" max="45" step="1" value="12"></div><div><label for="stylePresetChoice">Saved presets</label><select id="stylePresetChoice"><option value="">Choose a preset...</option></select></div></div><div class="subtitle-style-actions"><input id="stylePresetName" placeholder="Preset name, e.g. Gaming Bold" maxlength="50" style="flex:1;min-width:150px"><button type="button" onclick="saveSubtitlePreset()">Save preset</button><button class="secondary" type="button" onclick="applySubtitlePreset()">Load preset</button></div><p class="subtitle-note">Custom styles apply to this clip unless you save a preset and reuse it.</p></div><div id="subtitleFontsPanel" class="subtitle-panel hidden"><h3>My font library</h3><p class="muted small">Upload fonts you own or have permission to use (TTF or OTF, max 3 MB). They become available in the Style Designer.</p><input type="file" id="customFontFile" accept=".ttf,.otf,font/ttf,font/otf"><div class="subtitle-style-actions"><button type="button" onclick="uploadCustomFont()">Add font</button></div><div id="fontLibraryList" class="small muted" style="margin-top:14px">No custom fonts uploaded</div><p class="subtitle-note">Fonts and presets are currently stored on Render's temporary filesystem and may disappear after redeployment. Exporting with missing fonts will be blocked.</p></div><p class="small muted" id="captionHint">Subtitles require a transcript from the configured transcription provider.</p><div id="captionTools" class="caption-tools hidden"><div class="row" style="justify-content:space-between"><strong>Review and correct subtitles</strong><button class="secondary" type="button" onclick="addCaption()">+ Add subtitle</button><button class="secondary" type="button" onclick="saveCaptionEdits().catch(e=>toast(e.message))">Save subtitles</button></div><p class="small muted">Edit each subtitle’s start/end times and words, add a new line at the playhead, or delete any line. Click a timestamp to preview that line.</p><div id="captionList" class="caption-scroll"></div><p id="captionSaveState" class="small muted">No unsaved edits</p></div><div class="row" style="margin-top:20px"><button onclick="saveEdit(false)" class="secondary">Save changes</button><button onclick="saveEdit(true)">Approve & export</button></div><p class="small muted">The exported MP4 uses the aspect ratio you chose at upload. Captions are burned in only when enabled and available.</p></div></div></div></div><div id="toast"></div><script>
 let current={videos:[],clips:[],monitors:[]},selected=null,captionItems=[],captionsDirty=false,editorToken=0,cropRegion=null,cropObjectUrl=null,cropStart=null,layoutDirty=false,layoutValues=null,layoutFrame=0,layoutDrag=null,selectedClipIds=new Set(),waveLevels=[];
+let subtitleTheme=null,availableFonts={builtin:[],uploaded:[]},captionPresets=[],loadedFaces=new Set();
 const $=id=>document.getElementById(id);
 function toast(message){$('toast').textContent=message;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',4200)}
 function escapeHTML(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -134,14 +135,125 @@ uploadLayout();
 $('liveForm').onsubmit=async e=>{e.preventDefault();let p=Object.fromEntries(new FormData(e.target));try{await api('/monitors',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});toast('Monitor added. Click Start to begin.');e.target.reset();await refresh()}catch(ex){toast(ex.message)}};
 async function monAction(id,action){try{await api('/monitors/'+id+'/'+action,{method:'POST'});toast('Monitor '+action+' requested');await refresh()}catch(e){toast(e.message)}}
 
+
+function defaultTheme(mode='bold'){
+ return {font_id:null,font_family:'DejaVu Sans',font_size:mode==='minimal'?32:46,color:'#FFFFFF',stroke_color:'#000000',stroke_width:mode==='minimal'?1.5:3,opacity:100,position:12}
+}
+function showSubtitleTab(name){
+ for(const n of ['text','design','fonts']){
+  $('subtitle'+n.charAt(0).toUpperCase()+n.slice(1)+'Panel').classList.toggle('hidden',n!==name);
+  $('subTab'+n.charAt(0).toUpperCase()+n.slice(1)).classList.toggle('active',n===name)
+ }
+ if(name==='design')drawSubtitleStylePreview()
+}
+function fontValue(t){return t?.font_id?'uploaded:'+t.font_id:'builtin:'+(t?.font_family||'DejaVu Sans')}
+function refreshFontOptions(){
+ const select=$('styleFont'),value=fontValue(subtitleTheme);select.replaceChildren();
+ for(const family of availableFonts.builtin||[]){const o=document.createElement('option');o.value='builtin:'+family;o.textContent=family;select.append(o)}
+ for(const f of availableFonts.uploaded||[]){const o=document.createElement('option');o.value='uploaded:'+f.id;o.textContent=f.family+' (uploaded)';select.append(o)}
+ if([...select.options].some(o=>o.value===value))select.value=value;
+ $('fontLibraryList').textContent=(availableFonts.uploaded||[]).length?availableFonts.uploaded.map(f=>f.family).join(' · '):'No custom fonts uploaded'
+}
+async function loadCaptionStudio(token){
+ try{
+  const [fonts,presets]=await Promise.all([api('/fonts'),api('/caption-presets')]);
+  if(!selected||editorToken!==token)return;
+  availableFonts=fonts;captionPresets=presets;refreshFontOptions();renderPresetOptions();syncSubtitleThemeUI()
+ }catch(e){if(token===editorToken)toast('Subtitle studio unavailable: '+e.message)}
+}
+function renderPresetOptions(){
+ const el=$('stylePresetChoice');el.replaceChildren();
+ const o=document.createElement('option');o.value='';o.textContent='Choose a preset...';el.append(o);
+ for(const p of captionPresets){const x=document.createElement('option');x.value=p.id;x.textContent=p.name;el.append(x)}
+}
+async function ensurePreviewFont(){
+ if(!subtitleTheme?.font_id||loadedFaces.has(subtitleTheme.font_id))return;
+ const id=subtitleTheme.font_id;const font=new FontFace(subtitleTheme.font_family,'url("/api/fonts/'+id+'/file")');
+ try{await font.load();document.fonts.add(font);loadedFaces.add(id);drawSubtitleStylePreview();captionPosition()}
+ catch(e){toast('Could not load the selected custom font')}
+}
+function syncSubtitleThemeUI(){
+ if(!subtitleTheme)subtitleTheme=defaultTheme($('editCaptionStyle').value);
+ refreshFontOptions();
+ $('styleSize').value=subtitleTheme.font_size;
+ $('styleColor').value=subtitleTheme.color;
+ $('styleStrokeColor').value=subtitleTheme.stroke_color;
+ $('styleStroke').value=subtitleTheme.stroke_width;
+ $('styleOpacity').value=subtitleTheme.opacity;
+ $('stylePosition').value=subtitleTheme.position;
+ $('styleSizeLabel').textContent=subtitleTheme.font_size;
+ $('styleStrokeLabel').textContent=subtitleTheme.stroke_width;
+ $('styleOpacityLabel').textContent=subtitleTheme.opacity+'%';
+ $('stylePositionLabel').textContent=subtitleTheme.position+'%';
+ ensurePreviewFont();captionPosition();drawSubtitleStylePreview()
+}
+function readSubtitleTheme(){
+ const choice=$('styleFont').value;let id=null,family='DejaVu Sans';
+ if(choice.startsWith('uploaded:')){id=choice.slice(9);family=availableFonts.uploaded.find(x=>x.id===id)?.family||family}
+ else if(choice.startsWith('builtin:'))family=choice.slice(8);
+ subtitleTheme={font_id:id,font_family:family,font_size:Number($('styleSize').value),
+ color:$('styleColor').value.toUpperCase(),stroke_color:$('styleStrokeColor').value.toUpperCase(),
+ stroke_width:Number($('styleStroke').value),opacity:Number($('styleOpacity').value),position:Number($('stylePosition').value)};
+ $('styleSizeLabel').textContent=subtitleTheme.font_size;
+ $('styleStrokeLabel').textContent=subtitleTheme.stroke_width;
+ $('styleOpacityLabel').textContent=subtitleTheme.opacity+'%';
+ $('stylePositionLabel').textContent=subtitleTheme.position+'%';
+ if($('editCaptionStyle').value==='none')$('editCaptionStyle').value='custom';
+ ensurePreviewFont();captionPosition();drawSubtitleStylePreview()
+}
+for(const id of ['styleFont','styleSize','styleColor','styleStrokeColor','styleStroke','styleOpacity','stylePosition'])
+ $(id).addEventListener('input',readSubtitleTheme);
+function styleSubtitleElement(el,value,scale){
+ if(!subtitleTheme)return;
+ const t=subtitleTheme;
+ el.style.fontFamily='"'+t.font_family.replaceAll('"','')+'",sans-serif';
+ el.style.fontSize=(t.font_size*scale)+'px';
+ el.style.color=t.color;el.style.opacity=String(t.opacity/100);
+ el.style.fontWeight=$('editCaptionStyle').value==='bold'?'800':'600';
+ el.style.webkitTextStroke=(t.stroke_width*scale)+'px '+t.stroke_color;
+ el.style.paintOrder='stroke fill';
+ el.style.textShadow='0 2px 4px #0008';el.style.bottom=t.position+'%';
+ el.textContent=value
+}
+function drawSubtitleStylePreview(){
+ if(!selected||!subtitleTheme)return;
+ const canvas=$('captionStyleFrame'),ctx=canvas.getContext('2d');
+ ctx.fillStyle='#11111b';ctx.fillRect(0,0,540,960);
+ const original=$('layoutCanvas');
+ if(original.width&&original.height)try{ctx.drawImage(original,0,0,540,960)}catch(e){}
+ const live=captionItems.find(x=>$('preview').currentTime>=x.start&&$('preview').currentTime<x.end);
+ const value=live?.text||'THIS IS MY CUSTOM SUBTITLE',mode=$('editCaptionStyle').value;
+ styleSubtitleElement($('captionStyleSample'),mode==='bold'?value.toUpperCase():value,230/540)
+}
+async function uploadCustomFont(){
+ const file=$('customFontFile').files[0];if(!file){toast('Choose a TTF or OTF font first');return}
+ try{
+  const data=new FormData();data.append('file',file);
+  const result=await api('/fonts',{method:'POST',body:data});
+  availableFonts=await api('/fonts');subtitleTheme.font_id=result.id;subtitleTheme.font_family=result.family;
+  refreshFontOptions();syncSubtitleThemeUI();showSubtitleTab('design');toast(result.family+' added to font library')
+ }catch(e){toast(e.message)}
+}
+async function saveSubtitlePreset(){
+ const name=$('stylePresetName').value.trim();if(!name){toast('Name your preset first');return}
+ try{
+  const p=await api('/caption-presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,theme:subtitleTheme})});
+  captionPresets.push(p);renderPresetOptions();$('stylePresetChoice').value=p.id;toast('Preset saved: '+p.name)
+ }catch(e){toast(e.message)}
+}
+function applySubtitlePreset(){
+ const p=captionPresets.find(x=>x.id===$('stylePresetChoice').value);if(!p){toast('Choose a preset first');return}
+ subtitleTheme={...p.theme};$('editCaptionStyle').value='custom';syncSubtitleThemeUI();toast('Preset loaded: '+p.name)
+}
 function captionPosition(){
-  if(!selected)return;
-  const video=$('preview'),style=$('editCaptionStyle').value,now=video.currentTime;
-  const item=captionItems.find(c=>now>=c.start&&now<c.end);
-  const overlay=$('captionOverlay');
-  overlay.classList.toggle('hidden',style==='none'||!item);
-  overlay.classList.toggle('minimal',style==='minimal');
-  overlay.textContent=item?(style==='bold'?item.text.toUpperCase():item.text):'';
+ if(!selected)return;
+ const mode=$('editCaptionStyle').value,now=$('preview').currentTime;
+ const item=captionItems.find(c=>now>=c.start&&now<c.end);
+ const overlay=$('captionOverlay');
+ overlay.classList.toggle('hidden',mode==='none'||!item);
+ overlay.classList.toggle('minimal',mode==='minimal');
+ if(item)styleSubtitleElement(overlay,mode==='bold'?item.text.toUpperCase():item.text,($('ratioPreview').getBoundingClientRect().width||270)/540);
+ drawSubtitleStylePreview()
 }
 $('preview').addEventListener('timeupdate',captionPosition);
 $('preview').addEventListener('seeked',captionPosition);
@@ -329,6 +441,8 @@ function edit(id){
   selected=current.clips.find(x=>x.id===id);if(!selected)return;
   const token=++editorToken,v=current.videos.find(x=>x.id===selected.video_id);
   $('editCaptionStyle').value=selected.caption_style||'none';
+  subtitleTheme=selected.caption_theme?{...defaultTheme(),...JSON.parse(selected.caption_theme)}:defaultTheme(selected.caption_style||'bold');
+  showSubtitleTab('text');syncSubtitleThemeUI();loadCaptionStudio(token);
   $('editRatio').value=selected.aspect_ratio||'9:16';$('facecamMode').value=selected.facecam_mode||'off';
   layoutValues=selected.layout?{...defaultLayout(),...JSON.parse(selected.layout)}:defaultLayout();layoutDirty=false;
   updateVideoLayout();
@@ -350,7 +464,7 @@ async function saveEdit(approve){
   try{
     const id=selected.id;
     if(captionsDirty)await saveCaptionEdits();
-    await api('/clips/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('editTitle').value,start:Number($('editStart').value),end:Number($('editEnd').value),caption_style:$('editCaptionStyle').value,layout:layoutValues})});
+    await api('/clips/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('editTitle').value,start:Number($('editStart').value),end:Number($('editEnd').value),caption_style:$('editCaptionStyle').value,layout:layoutValues,caption_theme:subtitleTheme})});
     if(approve)await api('/clips/'+id+'/approve',{method:'POST'});
     toast(approve?'Approved with corrected subtitles. Rendering MP4…':'Changes saved');
     captionsDirty=false;closeEditor();await refresh()
