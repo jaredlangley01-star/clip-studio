@@ -481,7 +481,11 @@ def platform_videos(platform:str,_:None=Depends(auth)):
             videos.append({'id':vid,'title':sn.get('title','Untitled'),'published':sn.get('publishedAt'),
                  'thumbnail':(sn.get('thumbnails') or {}).get('medium',{}).get('url'),
                  'url':'https://www.youtube.com/watch?v='+vid,'type':'recording'})
-        live=exchange_json(base+'liveBroadcasts?'+urlencode({'part':'id,snippet,status','mine':'true','broadcastStatus':'active','maxResults':10}),headers=headers)
+        try:
+            live=exchange_json(base+'liveBroadcasts?'+urlencode({'part':'id,snippet,status','mine':'true','broadcastStatus':'active','maxResults':10}),headers=headers)
+        except HTTPException:
+            # Channels without live streaming access can still list uploads.
+            live={'items':[]}
         live_items=[{'id':v['id'],'title':v.get('snippet',{}).get('title','Live broadcast'),
             'published':v.get('snippet',{}).get('actualStartTime'), 'thumbnail':None,
             'url':'https://www.youtube.com/watch?v='+v['id'],'type':'live'} for v in live.get('items',[])]
