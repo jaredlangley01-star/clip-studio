@@ -275,9 +275,8 @@ def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
     if p.caption_style not in ('none','bold','minimal'):raise HTTPException(400,'Invalid subtitle style')
     if p.caption_style!='none':
         transcript=execute('SELECT data,error FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone()
-        if not transcript or not transcript['data']:
-            detail=(transcript['error'] if transcript else None) or 'No transcript is available.'
-            raise HTTPException(409,'Cannot add subtitles: '+detail+' Reanalyze the video after fixing transcription.')
+        if (not transcript or not transcript['data']) and not clip['caption_edits']:
+            raise HTTPException(409,'No transcript or manually entered subtitles. Add subtitles in the editor before exporting.')
     if p.aspect_ratio not in ('9:16','1:1','16:9'):raise HTTPException(400,'Invalid aspect ratio')
     if p.facecam_mode not in ('off','auto','manual'):raise HTTPException(400,'Invalid facecam mode')
     if p.facecam_mode!='off' and p.aspect_ratio!='9:16':raise HTTPException(400,'Facecam enlargement is available with 9:16 output')
@@ -325,8 +324,6 @@ class CaptionChanges(BaseModel):
 def update_captions(cid:str,p:CaptionChanges,_:None=Depends(auth)):
     clip=get_clip(cid)
     if clip['status']=='rendering':raise HTTPException(409,'Cannot edit captions while exporting')
-    if not execute('SELECT data FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone():
-        raise HTTPException(409,'No transcription exists')
     previous_end=clip['start']
     payload=[]
     for segment in p.captions:
