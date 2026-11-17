@@ -563,7 +563,7 @@ def approve(cid:str,_:None=Depends(auth)):
 class BatchSelection(BaseModel):
     ids:list[str]=Field(min_length=1,max_length=30)
 
-@app.post('/api/clips/batch/approve')
+@app.post('/api/batch/clips/approve')
 def batch_approve(p:BatchSelection,_:None=Depends(auth)):
     return queue_approvals(p.ids)
 
