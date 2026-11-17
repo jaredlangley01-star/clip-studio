@@ -38,6 +38,10 @@ def init():
         c.execute('CREATE TABLE IF NOT EXISTS clips(id TEXT PRIMARY KEY,video_id TEXT,title TEXT,start REAL,end REAL,score REAL,status TEXT,path TEXT,created TEXT, FOREIGN KEY(video_id) REFERENCES videos(id))')
         c.execute('CREATE TABLE IF NOT EXISTS monitors(id TEXT PRIMARY KEY,label TEXT,platform TEXT,source_url TEXT,status TEXT,error TEXT,created TEXT)')
         c.execute('CREATE TABLE IF NOT EXISTS transcripts(video_id TEXT PRIMARY KEY,data TEXT,provider TEXT,error TEXT)')
+        video_cols=[r[1] for r in c.execute('PRAGMA table_info(videos)')]
+        if 'aspect_ratio' not in video_cols:c.execute("ALTER TABLE videos ADD COLUMN aspect_ratio TEXT DEFAULT '9:16'")
+        if 'facecam_mode' not in video_cols:c.execute("ALTER TABLE videos ADD COLUMN facecam_mode TEXT DEFAULT 'off'")
+        if 'facecam_region' not in video_cols:c.execute("ALTER TABLE videos ADD COLUMN facecam_region TEXT")
         cols=[r[1] for r in c.execute('PRAGMA table_info(clips)')]
         if 'caption_style' not in cols:c.execute("ALTER TABLE clips ADD COLUMN caption_style TEXT DEFAULT 'none'")
         if 'reason' not in cols:c.execute("ALTER TABLE clips ADD COLUMN reason TEXT DEFAULT 'Audio activity'")
@@ -159,7 +163,7 @@ def process_video(vid, count=8, clip_length=35):
             with db() as c:
                 c.execute('UPDATE videos SET status=?,duration=?,error=NULL WHERE id=?',('ready',d,vid))
                 for i,(start,end,score,reason) in enumerate(picks,1):
-                    c.execute('INSERT INTO clips(id,video_id,title,start,end,score,status,path,created,caption_style,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid(),vid,f'Highlight {i:02d}',start,end,score,'review',None,utc(),'bold' if transcript else 'none',reason))
+                    c.execute('INSERT INTO clips(id,video_id,title,start,end,score,status,path,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(uid(),vid,f'Highlight {i:02d}',start,end,score,'review',None,utc(),'bold' if transcript else 'none',reason,row['aspect_ratio'] or '9:16',row['facecam_mode'] or 'off',row['facecam_region']))
     except Exception as e:
         execute('UPDATE videos SET status=?,error=? WHERE id=?',('failed',str(e)[:450],vid))
 
@@ -179,7 +183,7 @@ def root_page(_:None=Depends(auth)):
 
 @app.get('/api/state')
 def state(_:None=Depends(auth)):
-    return {'videos':[serialize(x) for x in execute('SELECT v.id,v.name,v.source,v.status,v.duration,v.error,v.created,t.provider AS transcript_provider,t.error AS transcript_error,CASE WHEN t.data IS NOT NULL THEN 1 ELSE 0 END AS has_transcript FROM videos v LEFT JOIN transcripts t ON t.video_id=v.id ORDER BY v.created DESC').fetchall()],
+    return {'videos':[serialize(x) for x in execute('SELECT v.id,v.name,v.source,v.status,v.duration,v.error,v.created,v.aspect_ratio,v.facecam_mode,v.facecam_region,t.provider AS transcript_provider,t.error AS transcript_error,CASE WHEN t.data IS NOT NULL THEN 1 ELSE 0 END AS has_transcript FROM videos v LEFT JOIN transcripts t ON t.video_id=v.id ORDER BY v.created DESC').fetchall()],
         'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region FROM clips ORDER BY created DESC').fetchall()],
         'monitors':[serialize(x) for x in execute('SELECT id,label,platform,status,error,created FROM monitors ORDER BY created DESC').fetchall()]}
 
@@ -194,8 +198,15 @@ def transcript_data(vid:str,_:None=Depends(auth)):
     return {'transcript':json.loads(row['data']) if row['data'] else None,'provider':row['provider'],'error':row['error']}
 
 @app.post('/api/upload')
-async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_length:int=Form(35),_:None=Depends(auth)):
+async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_length:int=Form(35),aspect_ratio:str=Form('9:16'),has_facecam:bool=Form(False),facecam_region:str=Form(''),_:None=Depends(auth)):
     if not 1<=highlight_count<=12 or not 10<=clip_length<=90:raise HTTPException(400,'Select 1–12 highlights and clip length 10–90 seconds')
+    if aspect_ratio not in ('9:16','1:1','16:9'):raise HTTPException(400,'Choose a valid aspect ratio')
+    if has_facecam and aspect_ratio!='9:16':raise HTTPException(400,'Facecam layout is currently supported only for 9:16')
+    region=None
+    if has_facecam:
+        try:region=validate_region(json.loads(facecam_region))
+        except (ValueError,TypeError,KeyError):raise HTTPException(400,'Choose and crop the facecam before uploading')
+        if region is None:raise HTTPException(400,'Crop the facecam before uploading')
     name=Path(file.filename or 'recording').name
     if Path(name).suffix.lower() not in ('.mp4','.mov','.mkv','.webm','.ts','.m4v'):
         raise HTTPException(400,'Please use MP4, MOV, MKV, WEBM, TS or M4V')
@@ -211,7 +222,7 @@ async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_leng
         if not total:raise HTTPException(400,'Empty file')
     except Exception:
         dest.unlink(missing_ok=True);raise
-    execute('INSERT INTO videos VALUES(?,?,?,?,?,?,?,?)',(vid,name,'upload','processing',str(dest),None,None,utc()))
+    execute('INSERT INTO videos(id,name,source,status,path,duration,error,created,aspect_ratio,facecam_mode,facecam_region) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(vid,name,'upload','processing',str(dest),None,None,utc(),aspect_ratio,'manual' if has_facecam else 'off',json.dumps(region) if region else None))
     threading.Thread(target=process_video,args=(vid,highlight_count,clip_length),daemon=True).start()
     return {'id':vid,'status':'processing'}
 
@@ -263,9 +274,6 @@ class ClipEdit(BaseModel):
     start:float=Field(ge=0)
     end:float=Field(gt=0)
     caption_style:str='none'
-    aspect_ratio:str='9:16'
-    facecam_mode:str='off'
-    facecam_region:dict[str,float]|None=None
 
 @app.patch('/api/clips/{cid}')
 def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
@@ -277,13 +285,9 @@ def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
         transcript=execute('SELECT data,error FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone()
         if (not transcript or not transcript['data']) and not clip['caption_edits']:
             raise HTTPException(409,'No transcript or manually entered subtitles. Add subtitles in the editor before exporting.')
-    if p.aspect_ratio not in ('9:16','1:1','16:9'):raise HTTPException(400,'Invalid aspect ratio')
-    if p.facecam_mode not in ('off','auto','manual'):raise HTTPException(400,'Invalid facecam mode')
-    if p.facecam_mode!='off' and p.aspect_ratio!='9:16':raise HTTPException(400,'Facecam enlargement is available with 9:16 output')
-    region=validate_region(p.facecam_region) if p.facecam_region else None
-    if p.facecam_mode=='manual' and not region:raise HTTPException(400,'Select a facecam region')
-    execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,aspect_ratio=?,facecam_mode=?,facecam_region=?,status=?,path=NULL WHERE id=?',
-        (p.title,p.start,p.end,p.caption_style,p.aspect_ratio,p.facecam_mode,json.dumps(region) if region else None,'review',cid))
+    # Layout is locked to the source upload, consistently across every highlight.
+    execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,status=?,path=NULL WHERE id=?',
+        (p.title,p.start,p.end,p.caption_style,'review',cid))
     return {'ok':True}
 
 def generated_captions(clip):
@@ -346,53 +350,6 @@ def validate_region(region):
         raise HTTPException(400,'Facecam region must be inside the video and at least 8% wide and tall')
     return {k:round(v,4) for k,v in zip(('x','y','w','h'),(x,y,w,h))}
 
-def detect_facecam_region(path, start, end):
-    """Conservative sampled detector: only select a face near a screen corner.
-    This does not claim to detect arbitrary streamer layouts."""
-    try:
-        import cv2, numpy as np
-    except ImportError:
-        return None,'OpenCV face detection is not installed'
-    detector=cv2.CascadeClassifier(cv2.data.haarcascades+'haarcascade_frontalface_default.xml')
-    if detector.empty():return None,'Face detector could not load'
-    picks=[]
-    for t in (start+0.5, start+(end-start)*0.5, max(start+0.5,end-0.5)):
-        try:
-            frame=subprocess.run(['ffmpeg','-nostdin','-v','error','-ss',str(max(0,t)),'-i',str(path),'-frames:v','1','-vf','scale=480:-2','-f','image2pipe','-vcodec','mjpeg','pipe:1'],capture_output=True,timeout=30)
-            img=cv2.imdecode(np.frombuffer(frame.stdout,dtype=np.uint8),cv2.IMREAD_COLOR)
-            if img is None:continue
-            hh,ww=img.shape[:2];gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
-            faces=detector.detectMultiScale(gray,scaleFactor=1.1,minNeighbors=4,minSize=(17,17))
-            for fx,fy,fw,fh in faces:
-                cx=(fx+fw/2)/ww;cy=(fy+fh/2)/hh
-                # A facecam is usually a face in one of the screen's four corners.
-                if not ((cx<0.37 or cx>0.63) and (cy<0.40 or cy>0.60)):continue
-                # Avoid treating a large central person in the actual footage as a facecam.
-                if fw/ww>0.24 or fh/hh>0.48:continue
-                corner=('left' if cx<0.5 else 'right','top' if cy<0.5 else 'bottom')
-                picks.append((corner,cx,cy,fw/ww,fh/hh))
-        except Exception:continue
-    if not picks:return None,'No corner facecam detected. Choose Manual and select the camera region.'
-    groups={}
-    for item in picks:groups.setdefault(item[0],[]).append(item)
-    best=max(groups.values(),key=len)
-    if len(best)<2:return None,'Facecam position could not be confirmed across frames. Use Manual.'
-    cx=sum(v[1] for v in best)/len(best);cy=sum(v[2] for v in best)/len(best)
-    fw=max(v[3] for v in best);fh=max(v[4] for v in best)
-    w=min(0.46,max(0.20,fw*3.0));h=min(0.55,max(0.25,fh*3.3))
-    # Anchor the full camera box to the side nearest the detected face.
-    x=max(0,min(1-w,cx-(w*0.40 if cx<0.5 else w*0.60)))
-    y=max(0,min(1-h,cy-(h*0.38 if cy<0.5 else h*0.62)))
-    return validate_region({'x':x,'y':y,'w':w,'h':h}),None
-
-@app.get('/api/clips/{cid}/facecam/detect')
-def facecam_detect(cid:str,_:None=Depends(auth)):
-    clip=get_clip(cid)
-    video=execute('SELECT path FROM videos WHERE id=?',(clip['video_id'],)).fetchone()
-    if not video or not Path(video['path']).exists():raise HTTPException(404,'Video unavailable')
-    region,error=detect_facecam_region(video['path'],clip['start'],clip['end'])
-    return {'region':region,'error':error}
-
 def srt_clock(seconds):
     ms=max(0,round(seconds*1000));h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
     return f'{h:02}:{m:02}:{s:02},{ms:03}'
@@ -423,9 +380,6 @@ def render_job(cid):
         width,height={'9:16':(540,960),'1:1':(720,720),'16:9':(960,540)}[ratio]
         region=json.loads(clip['facecam_region']) if clip['facecam_region'] else None
         if ratio=='9:16' and clip['facecam_mode']!='off':
-            if not region and clip['facecam_mode']=='auto':
-                region,error=detect_facecam_region(video['path'],clip['start'],clip['end'])
-                if not region:raise ValueError(error or 'No facecam detected; select a manual region')
             region=validate_region(region)
             if not region:raise ValueError('Facecam region is missing')
             x,y,w,h=(region[k] for k in ('x','y','w','h'))
