@@ -339,12 +339,12 @@ def subtitle_file(clip):
         a=max(0,float(item['start'])-clip['start'])
         b=min(clip['end']-clip['start'],float(item['end'])-clip['start'])
         if b<=a:continue
-        line=str(item['text']).replace('<','').replace('>','').replace('{','').replace('}','').replace('\\n',' ')
+        line=str(item['text']).replace('<','').replace('>','').replace('{','').replace('}','').replace('\n',' ')
         if clip['caption_style']=='bold':line=line.upper()
-        chunks.append(f"{len(chunks)+1}\\n{srt_clock(a)} --> {srt_clock(b)}\\n{line}\\n")
+        chunks.append(f"{len(chunks)+1}\n{srt_clock(a)} --> {srt_clock(b)}\n{line}\n")
     if not chunks:return None
     path=ROOT/'clips'/(clip['id']+'.srt')
-    path.write_text('\\n'.join(chunks).replace('\\\\n','\\n'),encoding='utf-8')
+    path.write_text('\n'.join(chunks).replace('\\\n','\n'),encoding='utf-8')
     return path
 
 def render_job(cid):
