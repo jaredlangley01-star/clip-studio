@@ -49,6 +49,7 @@ def init():
         if 'aspect_ratio' not in cols:c.execute("ALTER TABLE clips ADD COLUMN aspect_ratio TEXT DEFAULT '9:16'")
         if 'facecam_mode' not in cols:c.execute("ALTER TABLE clips ADD COLUMN facecam_mode TEXT DEFAULT 'off'")
         if 'facecam_region' not in cols:c.execute("ALTER TABLE clips ADD COLUMN facecam_region TEXT")
+        if 'layout' not in cols:c.execute("ALTER TABLE clips ADD COLUMN layout TEXT")
 init()
 
 def utc():return datetime.now(timezone.utc).isoformat()
@@ -184,7 +185,7 @@ def root_page(_:None=Depends(auth)):
 @app.get('/api/state')
 def state(_:None=Depends(auth)):
     return {'videos':[serialize(x) for x in execute('SELECT v.id,v.name,v.source,v.status,v.duration,v.error,v.created,v.aspect_ratio,v.facecam_mode,v.facecam_region,t.provider AS transcript_provider,t.error AS transcript_error,CASE WHEN t.data IS NOT NULL THEN 1 ELSE 0 END AS has_transcript FROM videos v LEFT JOIN transcripts t ON t.video_id=v.id ORDER BY v.created DESC').fetchall()],
-        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region FROM clips ORDER BY created DESC').fetchall()],
+        'clips':[serialize(x) for x in execute('SELECT id,video_id,title,start,end,score,status,created,caption_style,reason,aspect_ratio,facecam_mode,facecam_region,layout FROM clips ORDER BY created DESC').fetchall()],
         'monitors':[serialize(x) for x in execute('SELECT id,label,platform,status,error,created FROM monitors ORDER BY created DESC').fetchall()]}
 
 @app.get('/api/capabilities')
@@ -274,6 +275,7 @@ class ClipEdit(BaseModel):
     start:float=Field(ge=0)
     end:float=Field(gt=0)
     caption_style:str='none'
+    layout:dict|None=None
 
 @app.patch('/api/clips/{cid}')
 def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
@@ -285,9 +287,9 @@ def clip_edit(cid:str,p:ClipEdit,_:None=Depends(auth)):
         transcript=execute('SELECT data,error FROM transcripts WHERE video_id=?',(clip['video_id'],)).fetchone()
         if (not transcript or not transcript['data']) and not clip['caption_edits']:
             raise HTTPException(409,'No transcript or manually entered subtitles. Add subtitles in the editor before exporting.')
-    # Layout is locked to the source upload, consistently across every highlight.
-    execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,status=?,path=NULL WHERE id=?',
-        (p.title,p.start,p.end,p.caption_style,'review',cid))
+    layout=validate_layout(p.layout,clip) if p.layout is not None else (clip['layout'] or None)
+    execute('UPDATE clips SET title=?,start=?,end=?,caption_style=?,layout=?,status=?,path=NULL WHERE id=?',
+        (p.title,p.start,p.end,p.caption_style,json.dumps(layout) if isinstance(layout,dict) else layout,'review',cid))
     return {'ok':True}
 
 def generated_captions(clip):
@@ -350,6 +352,33 @@ def validate_region(region):
         raise HTTPException(400,'Facecam region must be inside the video and at least 8% wide and tall')
     return {k:round(v,4) for k,v in zip(('x','y','w','h'),(x,y,w,h))}
 
+
+def validate_layout(layout,clip):
+    if not isinstance(layout,dict):raise HTTPException(400,'Invalid layout settings')
+    defaults={'split':40,'cam_zoom':1.0,'cam_x':0,'cam_y':0,'game_zoom':1.0,'game_x':0,'game_y':0}
+    result={}
+    for key,default in defaults.items():
+        value=layout.get(key,default)
+        if isinstance(value,bool):raise HTTPException(400,'Invalid layout value')
+        try:value=float(value)
+        except (ValueError,TypeError):raise HTTPException(400,'Invalid layout value')
+        if not math.isfinite(value):raise HTTPException(400,'Invalid layout value')
+        lo,hi=(25,65) if key=='split' else (1,3) if key.endswith('zoom') else (-100,100)
+        if not lo<=value<=hi:raise HTTPException(400,'Layout values out of range')
+        result[key]=round(value,3)
+    return result
+
+@app.post('/api/clips/{cid}/layout/all')
+def apply_layout_to_video(cid:str,layout:dict,_:None=Depends(auth)):
+    clip=get_clip(cid)
+    data=validate_layout(layout,clip)
+    # Only unapproved clips; leave already exported files and concurrent renders unchanged.
+    with lock:
+        with db() as c:
+            affected=c.execute("UPDATE clips SET layout=? WHERE video_id=? AND status IN ('review','render_failed')",
+                 (json.dumps(data),clip['video_id'])).rowcount
+    return {'updated':affected}
+
 def srt_clock(seconds):
     ms=max(0,round(seconds*1000));h,ms=divmod(ms,3600000);m,ms=divmod(ms,60000);s,ms=divmod(ms,1000)
     return f'{h:02}:{m:02}:{s:02},{ms:03}'
@@ -381,15 +410,22 @@ def render_job(cid):
         region=json.loads(clip['facecam_region']) if clip['facecam_region'] else None
         if ratio=='9:16' and clip['facecam_mode']!='off':
             region=validate_region(region)
-            if not region:raise ValueError('Facecam region is missing')
+            if not region:raise ValueError('Facecam region missing')
+            config=validate_layout(json.loads(clip['layout']) if clip['layout'] else {},clip)
+            split=int(round(config['split']*height/100/2)*2)
+            bottom=height-split
             x,y,w,h=(region[k] for k in ('x','y','w','h'))
-            # Facecam fills the top 40%; the full game remains in the lower panel.
-            # All crop values are constrained to normalized source coordinates.
-            filtergraph=(f"[0:v]split=3[cam][game][back];"
-                f"[cam]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale=540:384:force_original_aspect_ratio=increase,crop=540:384,setsar=1[top];"
-                "[back]scale=540:576:force_original_aspect_ratio=increase,crop=540:576,boxblur=20:5[blur];"
-                "[game]scale=540:576:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                "[blur][fg]overlay=(W-w)/2:(H-h)/2[bottom];"
+            def panel_filter(source,target_h,zoom,px,py,output):
+                # Cover the panel, with adjustable zoom and pan. Crop after zoom prevents black bars.
+                sw=int(round(width*zoom/2)*2)
+                sh=int(round(target_h*zoom/2)*2)
+                return (f"[{source}]scale={sw}:{sh}:force_original_aspect_ratio=increase,"
+                        f"crop={width}:{target_h}:(in_w-out_w)*{(px+100)/200}:(in_h-out_h)*{(py+100)/200},setsar=1[{output}]")
+            cam_part=panel_filter('cropped',split,config['cam_zoom'],config['cam_x'],config['cam_y'],'top')
+            game_part=panel_filter('game',bottom,config['game_zoom'],config['game_x'],config['game_y'],'bottom')
+            filtergraph=(f"[0:v]split=2[cam][game];"
+                f"[cam]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y}[cropped];"
+                f"{cam_part};{game_part};"
                 "[top][bottom]vstack=inputs=2,format=yuv420p[v]")
         else:
             filtergraph=(f"[0:v]split=2[bg][fg];"
