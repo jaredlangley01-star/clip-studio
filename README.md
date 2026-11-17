@@ -1,0 +1,50 @@
+# Clip Studio — Build 1
+
+A small hosted, password-protected clipping MVP. Upload your own video or configure an **authorized HTTPS HLS** livestream, suggest audio-activity highlights, review/trim candidates, and **manually approve** vertical MP4 exports. **It never posts automatically.**
+
+## Included and actually working
+
+- Upload MP4/MOV/MKV/WEBM/TS/M4V videos (default max 2 GB)
+- Background analysis with FFmpeg audio RMS scoring and spaced highlight candidates (not semantic AI)
+- Review queue: preview originals, edit start/end/title, discard, approve
+- Portrait export (540×960, blurred fill) to downloadable MP4 with audio
+- Live feed capture from **authorized HTTPS HLS `.m3u8`** URL: 120-second chunks analyzed during broadcast; start/stop controls
+- SQLite data and media on a mounted Render persistent disk; password-protected dashboard
+
+## Not implemented yet
+
+- Twitch/YouTube OAuth, channel URL ingestion, Twitch chat spike detection, livestream auto-discovery
+- YouTube video downloading (not included due to API policies)
+- Whisper captions, semantic transcript understanding, smart subject reframing
+- Social-account publishing, team accounts, distributed background workers, automatic monitor restart
+
+## Deploy entirely online with Render
+
+1. Create a private GitHub repository and upload these files **at repository root**.
+2. In Render, choose **New > Blueprint**, connect the repository, and deploy `render.yaml`.
+3. When prompted, set **APP_PASSWORD** to a strong unique secret. `APP_USERNAME` defaults to `admin`.
+4. Render creates a paid `starter` Docker web service with a **20 GB persistent disk**. Check current Render pricing before approving deployment.
+5. Open the generated `.onrender.com` URL, sign in and test with a short MP4.
+6. Leave one instance running. Use the Live Monitor only for a direct HTTPS HLS feed you own or have permission to record. Twitch and YouTube *page URLs* are **not** HLS feed URLs.
+
+Persistent disk is essential: without it, uploads, exports and SQLite may vanish on redeploy. Videos consume substantial space. A hosted CPU without GPU may take minutes to analyze/export large recordings. Never expose the app with a weak password.
+
+## Local development (optional, not needed for hosting)
+
+```bash
+export APP_PASSWORD='your-unique-long-password'
+export DATA_DIR='./storage'
+pip install -r requirements.txt
+# requires ffmpeg and ffprobe installed
+uvicorn app.main:app --reload
+```
+
+Open http://localhost:8000 . If `APP_PASSWORD` is unset, API endpoints reject access.
+
+## Architecture and limitations
+
+FastAPI + a single-page static dashboard + SQLite + FFmpeg. Simple in-process background threads keep deployment small, but are not durable jobs: a server restart interrupts uploads, monitor capture, ongoing analysis and exports. For paid customer usage, move processing to dedicated queue/workers and storage to object storage + PostgreSQL. Live feed URLs can expire. HTTPS HLS feeds must be authorized. This build should be kept behind operator-only authentication and must not be exposed as a multi-tenant public service without additional network egress hardening and authentication work.
+
+**Platform policy:** YouTube API rules prohibit downloading/storing audiovisual content without YouTube's prior written approval. Twitch offers official API clips and downloads subject to authorization; direct platform integrations must use approved scopes and APIs.
+
+**Original source guide:** user-provided `gta6-clip-watcher-setup-guide.pdf` described Streamlink, chat spike counts, FFmpeg cutting and Whisper captions. This project adopts the overall monitoring-and-clipping concept but does not claim to implement its Twitch anonymous chat reader or Whisper captions yet.
