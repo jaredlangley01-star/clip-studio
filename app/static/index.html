@@ -290,6 +290,40 @@ async function saveCaptionEdits(){
   await api('/clips/'+selected.id+'/captions',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({captions:captionItems})});
   captionsDirty=false;$('captionSaveState').textContent='Subtitle corrections saved';
 }
+
+function drawWaveform(){
+ const canvas=$('audioWave'),ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height;
+ ctx.clearRect(0,0,w,h);ctx.fillStyle='#171527';ctx.fillRect(0,0,w,h);
+ const levels=waveLevels;
+ if(!levels.length){ctx.fillStyle='#9a92b4';ctx.font='14px sans-serif';ctx.fillText('Waveform not available for this recording',20,35);return}
+ const barW=w/levels.length;
+ levels.forEach((level,i)=>{
+  const high=Math.max(2,level*(h-10));
+  ctx.fillStyle='#8a6af7';ctx.fillRect(i*barW+0.5,(h-high)/2,Math.max(1,barW-1),high)
+ });
+ if(selected){
+  const now=$('preview').currentTime,lo=Number($('editStart').value),hi=Number($('editEnd').value);
+  const x=w*Math.max(0,Math.min(1,(now-lo)/Math.max(0.1,hi-lo)));
+  ctx.fillStyle='#fff';ctx.fillRect(x-1,0,2,h)
+ }
+}
+async function loadWaveform(id,token){
+ waveLevels=[];$('waveformHint').textContent='Analyzing audio…';drawWaveform();
+ try{
+  const result=await api('/clips/'+id+'/waveform');
+  if(!selected||selected.id!==id||editorToken!==token)return;
+  waveLevels=result.levels||[];
+  $('waveformHint').textContent=waveLevels.length?'Click waveform to seek · approximate audio energy':'No audio waveform could be decoded';
+  drawWaveform()
+ }catch(e){if(editorToken===token){$('waveformHint').textContent=e.message;drawWaveform()}}
+}
+$('audioWave').addEventListener('click',e=>{
+ if(!selected)return;
+ const rect=$('audioWave').getBoundingClientRect(),fraction=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));
+ const lo=Number($('editStart').value),hi=Number($('editEnd').value);
+ $('preview').currentTime=lo+(hi-lo)*fraction;drawWaveform()
+});
+$('preview').addEventListener('timeupdate',drawWaveform);
 function edit(id){
   selected=current.clips.find(x=>x.id===id);if(!selected)return;
   const token=++editorToken,v=current.videos.find(x=>x.id===selected.video_id);
@@ -303,7 +337,7 @@ function edit(id){
   $('preview').src='/api/video/'+selected.video_id+'/stream';$('modal').classList.remove('hidden');
   cancelAnimationFrame(layoutFrame);layoutFrame=requestAnimationFrame(layoutLoop);
   $('preview').addEventListener('loadedmetadata',function seek(){this.currentTime=selected.start;this.removeEventListener('loadedmetadata',seek)});
-  loadClipCaptions(id,token)
+  loadClipCaptions(id,token);loadWaveform(id,token)
 }
 function closeEditor(){
   if(captionsDirty&&!confirm('Discard unsaved subtitle corrections?'))return;
