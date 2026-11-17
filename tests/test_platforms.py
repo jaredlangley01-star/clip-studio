@@ -40,7 +40,8 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(row['platform'],platform)
 
     def test_oauth_callback_consumes_state_and_encrypts_tokens(self):
-        state=main.platform_connect('twitch',None)['authorization_url'].split('state=')[-1]
+        from urllib.parse import urlparse,parse_qs
+        state=parse_qs(urlparse(main.platform_connect('twitch',None)['authorization_url']).query)['state'][0]
         def exchange(url,form=None,headers=None):
             if url.endswith('/token'):return {'access_token':'my-secret-token','refresh_token':'refresh-secret','expires_in':3000}
             if url.endswith('/users'):return {'data':[{'id':'99','display_name':'Streamer'}]}
