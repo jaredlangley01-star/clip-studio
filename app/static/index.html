@@ -7,7 +7,7 @@
 <section id="review" class="hidden"><h2>Suggested highlights</h2><p class="muted">Preview and adjust timing. Approval renders the clip; it does not post to social media.</p><div id="reviewGrid" class="clips"></div></section>
 <section id="live" class="hidden"><div class="card"><h2>Monitor an authorized HLS livestream (disabled on free test)</h2><p class="notice">Free Render instances go to sleep and have temporary storage. Live monitoring is intentionally disabled for this test build.</p><p class="muted">Provide a direct HTTPS .m3u8 feed that you control or have been authorized to capture. This is not a Twitch/YouTube URL importer or OAuth connection.</p><form id="liveForm"><div class="form-cols"><div><label>Monitor name</label><input name="label" placeholder="My Twitch gaming stream" required></div><div><label>Platform label</label><select name="platform"><option value="twitch">Twitch</option><option value="youtube">YouTube</option><option value="other">Other</option></select></div></div><label>Authorized HTTPS HLS playlist URL</label><input name="source_url" type="url" placeholder="https://your-stream-host.example/live/playlist.m3u8" required><div style="margin-top:16px"><button>Add monitor</button></div></form><p class="small muted">Each completed approximately two-minute segment produces new review candidates while the feed is live. Recording starts only when you click Start. Stream connections stop on server restart; this initial build does not auto-resume.</p></div><div class="section card"><h2>Configured monitors</h2><div id="monitors"></div></div></section>
 <section id="exports" class="hidden"><h2>Approved exports</h2><div id="exportGrid" class="clips"></div></section>
-</main></div><div class="modal hidden" id="modal"><div class="dialog"><div class="row" style="justify-content:space-between"><h2>Review Highlight</h2><button class="secondary" onclick="closeEditor()">✕ Close</button></div><div id="ratioPreview" class="ratio-preview" data-ratio="9:16"><video id="facecamPreview" class="facecam-preview" muted playsinline preload="metadata"></video><div class="caption-player"><video id="preview" controls preload="metadata"></video><div id="captionOverlay" class="caption-overlay hidden"></div></div></div><div class="caption-preview-note">Aspect ratio and face-cam crop are set during upload for all highlights. The preview is approximate; the exported video is definitive.</div><label>Title</label><input id="editTitle"><div class="editor-grid"><div><label>Start (seconds)</label><input id="editStart" type="number" min="0" step="0.1"></div><div><label>End (seconds)</label><input id="editEnd" type="number" min="0" step="0.1"></div></div><input type="hidden" id="editRatio" value="9:16"><input type="hidden" id="facecamMode" value="off"><label for="editCaptionStyle">Subtitle style</label><select id="editCaptionStyle"><option value="none">No subtitles</option><option value="bold">Bold uppercase</option><option value="minimal">Minimal</option></select><p class="small muted" id="captionHint">Subtitles require a transcript from the configured transcription provider.</p><div id="captionTools" class="caption-tools hidden"><div class="row" style="justify-content:space-between"><strong>Review and correct subtitles</strong><button class="secondary" type="button" onclick="addCaption()">+ Add subtitle</button><button class="secondary" type="button" onclick="saveCaptionEdits().catch(e=>toast(e.message))">Save subtitles</button></div><p class="small muted">Edit each subtitle’s start/end times and words, add a new line at the playhead, or delete any line. Click a timestamp to preview that line.</p><div id="captionList" class="caption-scroll"></div><p id="captionSaveState" class="small muted">No unsaved edits</p></div><div class="row" style="margin-top:20px"><button onclick="saveEdit(false)" class="secondary">Save changes</button><button onclick="saveEdit(true)">Approve & export</button></div><p class="small muted">Exports as 540×960 portrait with blurred background. Burned-in captions are included only when word-timed transcription is available.</p></div></div><div id="toast"></div><script>
+</main></div><div class="modal hidden" id="modal"><div class="dialog"><div class="row" style="justify-content:space-between"><h2>Review Highlight</h2><button class="secondary" onclick="closeEditor()">✕ Close</button></div><div id="ratioPreview" class="ratio-preview" data-ratio="9:16"><canvas id="facecamPreview" class="facecam-preview" width="540" height="384"></canvas><div class="caption-player"><video id="preview" controls preload="metadata"></video><div id="captionOverlay" class="caption-overlay hidden"></div></div></div><div class="caption-preview-note">Aspect ratio and face-cam crop are set during upload for all highlights. The preview is approximate; the exported video is definitive.</div><label>Title</label><input id="editTitle"><div class="editor-grid"><div><label>Start (seconds)</label><input id="editStart" type="number" min="0" step="0.1"></div><div><label>End (seconds)</label><input id="editEnd" type="number" min="0" step="0.1"></div></div><input type="hidden" id="editRatio" value="9:16"><input type="hidden" id="facecamMode" value="off"><label for="editCaptionStyle">Subtitle style</label><select id="editCaptionStyle"><option value="none">No subtitles</option><option value="bold">Bold uppercase</option><option value="minimal">Minimal</option></select><p class="small muted" id="captionHint">Subtitles require a transcript from the configured transcription provider.</p><div id="captionTools" class="caption-tools hidden"><div class="row" style="justify-content:space-between"><strong>Review and correct subtitles</strong><button class="secondary" type="button" onclick="addCaption()">+ Add subtitle</button><button class="secondary" type="button" onclick="saveCaptionEdits().catch(e=>toast(e.message))">Save subtitles</button></div><p class="small muted">Edit each subtitle’s start/end times and words, add a new line at the playhead, or delete any line. Click a timestamp to preview that line.</p><div id="captionList" class="caption-scroll"></div><p id="captionSaveState" class="small muted">No unsaved edits</p></div><div class="row" style="margin-top:20px"><button onclick="saveEdit(false)" class="secondary">Save changes</button><button onclick="saveEdit(true)">Approve & export</button></div><p class="small muted">Exports as 540×960 portrait with blurred background. Burned-in captions are included only when word-timed transcription is available.</p></div></div><div id="toast"></div><script>
 let current={videos:[],clips:[],monitors:[]},selected=null,captionItems=[],captionsDirty=false,editorToken=0,cropRegion=null,cropObjectUrl=null,cropStart=null;
 const $=id=>document.getElementById(id);
 function toast(message){$('toast').textContent=message;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',4200)}
@@ -119,17 +119,34 @@ function addCaption(){
   captionItems.sort((a,b)=>a.start-b.start);markCaptionDirty();drawCaptions();$('captionTools').classList.remove('hidden')
 }
 
+
 function updateVideoLayout(){
  const ratio=$('editRatio').value,active=ratio==='9:16'&&$('facecamMode').value==='manual';
  $('ratioPreview').dataset.ratio=ratio;$('ratioPreview').classList.toggle('facecam-on',active);
- captionPosition()
+ renderFacecamFrame();captionPosition()
 }
-$('preview').addEventListener('timeupdate',()=>{
- const face=$('facecamPreview'),main=$('preview');
- if(face.src&&Math.abs(face.currentTime-main.currentTime)>0.30)face.currentTime=main.currentTime
-});
-$('preview').addEventListener('play',()=>{if($('ratioPreview').classList.contains('facecam-on'))$('facecamPreview').play().catch(()=>{})});
-$('preview').addEventListener('pause',()=>$('facecamPreview').pause());
+function renderFacecamFrame(){
+ if(!selected||!$('ratioPreview').classList.contains('facecam-on'))return;
+ const v=$('preview'),c=$('facecamPreview');
+ if(!v.videoWidth||!v.videoHeight)return;
+ let r=null;try{r=JSON.parse(selected.facecam_region||'null')}catch(e){}
+ if(!r)return;
+ const x=Math.max(0,r.x*v.videoWidth),y=Math.max(0,r.y*v.videoHeight);
+ const w=Math.min(v.videoWidth-x,r.w*v.videoWidth),h=Math.min(v.videoHeight-y,r.h*v.videoHeight);
+ if(w<=0||h<=0)return;
+ const ctx=c.getContext('2d');
+ const zoom=Math.max(c.width/w,c.height/h),dw=w*zoom,dh=h*zoom;
+ ctx.clearRect(0,0,c.width,c.height);
+ try{ctx.drawImage(v,x,y,w,h,(c.width-dw)/2,(c.height-dh)/2,dw,dh)}catch(e){}
+}
+$('preview').addEventListener('timeupdate',renderFacecamFrame);
+$('preview').addEventListener('seeked',renderFacecamFrame);
+$('preview').addEventListener('loadeddata',renderFacecamFrame);
+let facecamFrame=0;
+function facecamLoop(){
+ if(!selected)return;
+ renderFacecamFrame();facecamFrame=requestAnimationFrame(facecamLoop)
+}
 async function loadClipCaptions(id,token){
   captionItems=[];captionsDirty=false;$('captionSaveState').textContent='No unsaved edits';
   try{
@@ -157,13 +174,14 @@ function edit(id){
   $('captionHint').textContent=v?.has_transcript?'Transcript ready. Preview and adjust subtitle lines before exporting.':'No transcript available. You can add your own timed subtitle lines, or reanalyze to request Groq captions.';
   $('editTitle').value=selected.title;$('editStart').value=selected.start;$('editEnd').value=selected.end;
   $('captionTools').classList.add('hidden');$('captionOverlay').classList.add('hidden');
-  $('preview').src='/api/video/'+selected.video_id+'/stream';$('facecamPreview').src=$('preview').src;$('modal').classList.remove('hidden');
+  $('preview').src='/api/video/'+selected.video_id+'/stream';$('modal').classList.remove('hidden');
+  cancelAnimationFrame(facecamFrame);facecamFrame=requestAnimationFrame(facecamLoop);
   $('preview').addEventListener('loadedmetadata',function seek(){this.currentTime=selected.start;this.removeEventListener('loadedmetadata',seek)});
   loadClipCaptions(id,token)
 }
 function closeEditor(){
   if(captionsDirty&&!confirm('Discard unsaved subtitle corrections?'))return;
-  ++editorToken;$('preview').pause();$('facecamPreview').pause();$('facecamPreview').removeAttribute('src');$('facecamPreview').load();$('preview').removeAttribute('src');$('preview').load();$('modal').classList.add('hidden');
+  ++editorToken;cancelAnimationFrame(facecamFrame);$('preview').pause();$('preview').removeAttribute('src');$('preview').load();$('modal').classList.add('hidden');
   $('captionOverlay').classList.add('hidden');selected=null;captionItems=[];captionsDirty=false
 }
 async function saveEdit(approve){
