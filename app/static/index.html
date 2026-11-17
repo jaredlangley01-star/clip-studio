@@ -44,12 +44,7 @@ async function disconnectPlatform(platform){
  if(!confirm('Disconnect '+platform+' from Clip Studio?'))return;
  try{
   await api('/platforms/'+platform,{method:'DELETE'});
-  await loadPlatforms();
-const oauthResult=new URLSearchParams(location.search).get('connected');
-if(oauthResult==='youtube'||oauthResult==='twitch'){
- tab('platforms');toast((oauthResult==='youtube'?'YouTube':'Twitch')+' account connected');
- history.replaceState(null,'',location.pathname);
-}$('platformVideos').replaceChildren();$('platformNotice').textContent='Disconnected.'
+  await loadPlatforms();$('platformVideos').replaceChildren();$('platformNotice').textContent='Disconnected.'
  }catch(e){toast(e.message)}
 }
 async function loadPlatformVideos(platform){
@@ -76,6 +71,12 @@ $('platformPicker').addEventListener('change',e=>loadPlatformVideos(e.target.val
 function tab(name){document.querySelectorAll('main section').forEach(e=>e.classList.toggle('hidden',e.id!==name));document.querySelectorAll('.nav').forEach(e=>e.classList.toggle('active',e.dataset.tab===name));$('heading').textContent={overview:'Overview',videos:'Video Library',review:'Review Queue',live:'Live Monitor',platforms:'YouTube & Twitch',exports:'Exports'}[name]}
 document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>tab(n.dataset.tab));
 loadPlatforms();
+const oauthResult=new URLSearchParams(location.search).get('connected');
+if(oauthResult==='youtube'||oauthResult==='twitch'){
+ tab('platforms');toast((oauthResult==='youtube'?'YouTube':'Twitch')+' account connected');
+ history.replaceState(null,'',location.pathname);
+}
+
 const fmt=s=>Number.isFinite(Number(s))?`${Math.floor(s/60)}:${('0'+Math.floor(s%60)).slice(-2)}`:'—';
 function render(){let v=current.videos,c=current.clips,m=current.monitors;$('videoCount').textContent=v.length;$('reviewCount').textContent=c.filter(x=>x.status==='review').length;$('exportCount').textContent=c.filter(x=>x.status==='exported').length;
 $('videoRows').innerHTML=v.map(x=>`<tr><td>${escapeHTML(x.name)}</td><td>${escapeHTML(x.source)}</td><td>${fmt(x.duration)}</td><td><span class="status">${escapeHTML(x.status)}</span>${x.error?`<div class="small muted">${escapeHTML(x.error)}</div>`:''}${x.status==='ready'?`<div class="small muted" style="margin-top:8px">${x.has_transcript?'✅ Transcript ready':`⚠ ${escapeHTML(x.transcript_error||'Audio-only: no transcript')}`}</div><button class="secondary" style="margin-top:8px" onclick="reanalyze('${x.id}')">Reanalyze</button>`:''}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">No recordings yet.</td></tr>';
