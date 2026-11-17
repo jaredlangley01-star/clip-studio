@@ -121,32 +121,107 @@ function addCaption(){
 }
 
 
+
+function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v))}
+function defaultLayout(){return {split:40,cam_zoom:1,cam_x:0,cam_y:0,game_zoom:1,game_x:0,game_y:0}}
+function syncLayoutSliders(){
+ for(const key of ['Split','camZoom','camX','camY','gameZoom','gameX','gameY']){
+  const field={Split:'split',camZoom:'cam_zoom',camX:'cam_x',camY:'cam_y',gameZoom:'game_zoom',gameX:'game_x',gameY:'game_y'}[key];
+  $(key==='Split'?'layoutSplit':key).value=layoutValues[field]
+ }
+ $('layoutSplitLabel').textContent=Math.round(layoutValues.split)+'%';
+ $('camZoomLabel').textContent=Number(layoutValues.cam_zoom).toFixed(2)+'×';
+ $('gameZoomLabel').textContent=Number(layoutValues.game_zoom).toFixed(2)+'×';
+}
+function readLayoutSliders(){
+ layoutValues={split:Number($('layoutSplit').value),cam_zoom:Number($('camZoom').value),cam_x:Number($('camX').value),cam_y:Number($('camY').value),game_zoom:Number($('gameZoom').value),game_x:Number($('gameX').value),game_y:Number($('gameY').value)};
+ layoutDirty=true;syncLayoutSliders();renderLayoutFrame()
+}
+['layoutSplit','camZoom','camX','camY','gameZoom','gameX','gameY'].forEach(k=>$(k).addEventListener('input',readLayoutSliders));
 function updateVideoLayout(){
- const ratio=$('editRatio').value,active=ratio==='9:16'&&$('facecamMode').value==='manual';
- $('ratioPreview').dataset.ratio=ratio;$('ratioPreview').classList.toggle('facecam-on',active);
- renderFacecamFrame();captionPosition()
-}
-function renderFacecamFrame(){
- if(!selected||!$('ratioPreview').classList.contains('facecam-on'))return;
- const v=$('preview'),c=$('facecamPreview');
- if(!v.videoWidth||!v.videoHeight)return;
- let r=null;try{r=JSON.parse(selected.facecam_region||'null')}catch(e){}
- if(!r)return;
- const x=Math.max(0,r.x*v.videoWidth),y=Math.max(0,r.y*v.videoHeight);
- const w=Math.min(v.videoWidth-x,r.w*v.videoWidth),h=Math.min(v.videoHeight-y,r.h*v.videoHeight);
- if(w<=0||h<=0)return;
- const ctx=c.getContext('2d');
- const zoom=Math.max(c.width/w,c.height/h),dw=w*zoom,dh=h*zoom;
- ctx.clearRect(0,0,c.width,c.height);
- try{ctx.drawImage(v,x,y,w,h,(c.width-dw)/2,(c.height-dh)/2,dw,dh)}catch(e){}
-}
-$('preview').addEventListener('timeupdate',renderFacecamFrame);
-$('preview').addEventListener('seeked',renderFacecamFrame);
-$('preview').addEventListener('loadeddata',renderFacecamFrame);
-let facecamFrame=0;
-function facecamLoop(){
  if(!selected)return;
- renderFacecamFrame();facecamFrame=requestAnimationFrame(facecamLoop)
+ const ratio=$('editRatio').value,active=ratio==='9:16'&&$('facecamMode').value==='manual';
+ $('ratioPreview').dataset.ratio=ratio;
+ $('ratioPreview').classList.remove('facecam-on');
+ $('layoutControls').classList.toggle('hidden',!active);
+ const canvas=$('layoutCanvas'),dims={'9:16':[540,960],'1:1':[720,720],'16:9':[960,540]}[ratio]||[540,960];
+ canvas.width=dims[0];canvas.height=dims[1];
+ syncLayoutSliders();renderLayoutFrame();captionPosition()
+}
+function coverDraw(ctx,video,source,dest,zoom,px,py){
+ if(!video.videoWidth||!video.videoHeight||source.w<=0||source.h<=0)return;
+ const scale=Math.max(dest.w/source.w,dest.h/source.h)*zoom,drawW=source.w*scale,drawH=source.h*scale;
+ const offsetX=-(drawW-dest.w)*(px+100)/200,offsetY=-(drawH-dest.h)*(py+100)/200;
+ ctx.save();ctx.beginPath();ctx.rect(dest.x,dest.y,dest.w,dest.h);ctx.clip();
+ try{ctx.drawImage(video,source.x,source.y,source.w,source.h,dest.x+offsetX,dest.y+offsetY,drawW,drawH)}catch(e){}
+ ctx.restore();
+ return {overflowX:Math.max(0,drawW-dest.w),overflowY:Math.max(0,drawH-dest.h)}
+}
+function getSourceRegion(){
+ if(!selected)return null;try{return JSON.parse(selected.facecam_region||'null')}catch(e){return null}
+}
+function panelMetrics(which){
+ const v=$('preview'),c=$('layoutCanvas'),split=Math.round(c.height*layoutValues.split/100/2)*2,reg=getSourceRegion();
+ const top=which==='cam',source=top&&reg?{x:reg.x*v.videoWidth,y:reg.y*v.videoHeight,w:reg.w*v.videoWidth,h:reg.h*v.videoHeight}:{x:0,y:0,w:v.videoWidth,h:v.videoHeight};
+ const target={x:0,y:top?0:split,w:c.width,h:top?split:c.height-split};
+ const z=layoutValues[top?'cam_zoom':'game_zoom'];
+ return {source,target,zoom:z}
+}
+function renderLayoutFrame(){
+ if(!selected)return;
+ const v=$('preview'),canvas=$('layoutCanvas');if(!v.videoWidth)return;
+ const ctx=canvas.getContext('2d');ctx.fillStyle='#101018';ctx.fillRect(0,0,canvas.width,canvas.height);
+ const face=$('editRatio').value==='9:16'&&$('facecamMode').value==='manual';
+ if(face){
+  const cam=panelMetrics('cam'),game=panelMetrics('game');
+  coverDraw(ctx,v,cam.source,cam.target,cam.zoom,layoutValues.cam_x,layoutValues.cam_y);
+  coverDraw(ctx,v,game.source,game.target,game.zoom,layoutValues.game_x,layoutValues.game_y);
+  ctx.fillStyle='#171322';ctx.fillRect(0,cam.target.h-1,canvas.width,2);
+ }else{
+  const source={x:0,y:0,w:v.videoWidth,h:v.videoHeight};
+  coverDraw(ctx,v,source,{x:0,y:0,w:canvas.width,h:canvas.height},1,0,0)
+ }
+ $('layoutSeek').min=Number($('editStart').value)||0;
+ $('layoutSeek').max=Number($('editEnd').value)||v.duration||100;
+ $('layoutSeek').value=clamp(v.currentTime,Number($('layoutSeek').min),Number($('layoutSeek').max));
+ $('layoutTime').textContent=fmt(v.currentTime);
+ $('layoutPlay').textContent=v.paused?'▶ Play':'❚❚ Pause';
+}
+function layoutLoop(){
+ if(!selected)return;renderLayoutFrame();layoutFrame=requestAnimationFrame(layoutLoop)
+}
+function toggleLayoutPlayback(){
+ const v=$('preview');if(v.paused)v.play().catch(e=>toast('Playback unavailable: '+e.message));else v.pause()
+}
+$('layoutSeek').addEventListener('input',e=>{$('preview').currentTime=Number(e.target.value);renderLayoutFrame()});
+const layoutCanvas=$('layoutCanvas');
+layoutCanvas.addEventListener('pointerdown',e=>{
+ if(!selected||$('layoutControls').classList.contains('hidden'))return;
+ const b=layoutCanvas.getBoundingClientRect(),ny=(e.clientY-b.top)/b.height;
+ layoutDrag={x:e.clientX,y:e.clientY,which:ny<layoutValues.split/100?'cam':'game'};
+ layoutCanvas.setPointerCapture(e.pointerId)
+});
+layoutCanvas.addEventListener('pointermove',e=>{
+ if(!layoutDrag)return;
+ const which=layoutDrag.which,info=panelMetrics(which),v=$('preview');
+ const scale=Math.max(info.target.w/info.source.w,info.target.h/info.source.h)*info.zoom;
+ const extraX=Math.max(0,info.source.w*scale-info.target.w),extraY=Math.max(0,info.source.h*scale-info.target.h);
+ const width=layoutCanvas.getBoundingClientRect().width,height=layoutCanvas.getBoundingClientRect().height;
+ const dx=(e.clientX-layoutDrag.x)*layoutCanvas.width/width,dy=(e.clientY-layoutDrag.y)*layoutCanvas.height/height;
+ const xkey=which+'_x',ykey=which+'_y';
+ if(extraX>0.5)layoutValues[xkey]=clamp(layoutValues[xkey]-dx/extraX*200,-100,100);
+ if(extraY>0.5)layoutValues[ykey]=clamp(layoutValues[ykey]-dy/extraY*200,-100,100);
+ layoutDrag.x=e.clientX;layoutDrag.y=e.clientY;layoutDirty=true;syncLayoutSliders();renderLayoutFrame()
+});
+layoutCanvas.addEventListener('pointerup',e=>{layoutDrag=null;if(layoutCanvas.hasPointerCapture(e.pointerId))layoutCanvas.releasePointerCapture(e.pointerId)});
+layoutCanvas.addEventListener('pointercancel',()=>{layoutDrag=null});
+function resetLayout(){layoutValues=defaultLayout();layoutDirty=true;syncLayoutSliders();renderLayoutFrame()}
+async function applyLayoutAll(){
+ if(!selected)return;
+ try{
+  const result=await api('/clips/'+selected.id+'/layout/all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(layoutValues)});
+  layoutDirty=false;toast('Applied this layout to '+result.updated+' unapproved highlights');await refresh()
+ }catch(e){toast(e.message)}
 }
 async function loadClipCaptions(id,token){
   captionItems=[];captionsDirty=false;$('captionSaveState').textContent='No unsaved edits';
@@ -171,18 +246,19 @@ function edit(id){
   const token=++editorToken,v=current.videos.find(x=>x.id===selected.video_id);
   $('editCaptionStyle').value=selected.caption_style||'none';
   $('editRatio').value=selected.aspect_ratio||'9:16';$('facecamMode').value=selected.facecam_mode||'off';
+  layoutValues=selected.layout?{...defaultLayout(),...JSON.parse(selected.layout)}:defaultLayout();layoutDirty=false;
   updateVideoLayout();
   $('captionHint').textContent=v?.has_transcript?'Transcript ready. Preview and adjust subtitle lines before exporting.':'No transcript available. You can add your own timed subtitle lines, or reanalyze to request Groq captions.';
   $('editTitle').value=selected.title;$('editStart').value=selected.start;$('editEnd').value=selected.end;
   $('captionTools').classList.add('hidden');$('captionOverlay').classList.add('hidden');
   $('preview').src='/api/video/'+selected.video_id+'/stream';$('modal').classList.remove('hidden');
-  cancelAnimationFrame(facecamFrame);facecamFrame=requestAnimationFrame(facecamLoop);
+  cancelAnimationFrame(layoutFrame);layoutFrame=requestAnimationFrame(layoutLoop);
   $('preview').addEventListener('loadedmetadata',function seek(){this.currentTime=selected.start;this.removeEventListener('loadedmetadata',seek)});
   loadClipCaptions(id,token)
 }
 function closeEditor(){
   if(captionsDirty&&!confirm('Discard unsaved subtitle corrections?'))return;
-  ++editorToken;cancelAnimationFrame(facecamFrame);$('preview').pause();$('preview').removeAttribute('src');$('preview').load();$('modal').classList.add('hidden');
+  ++editorToken;cancelAnimationFrame(layoutFrame);$('preview').pause();$('preview').removeAttribute('src');$('preview').load();$('modal').classList.add('hidden');
   $('captionOverlay').classList.add('hidden');selected=null;captionItems=[];captionsDirty=false
 }
 async function saveEdit(approve){
@@ -190,7 +266,7 @@ async function saveEdit(approve){
   try{
     const id=selected.id;
     if(captionsDirty)await saveCaptionEdits();
-    await api('/clips/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('editTitle').value,start:Number($('editStart').value),end:Number($('editEnd').value),caption_style:$('editCaptionStyle').value})});
+    await api('/clips/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('editTitle').value,start:Number($('editStart').value),end:Number($('editEnd').value),caption_style:$('editCaptionStyle').value,layout:layoutValues})});
     if(approve)await api('/clips/'+id+'/approve',{method:'POST'});
     toast(approve?'Approved with corrected subtitles. Rendering MP4…':'Changes saved');
     captionsDirty=false;closeEditor();await refresh()
