@@ -94,5 +94,25 @@ class CaptionEditorTests(unittest.TestCase):
             main.validate_region({'x':0.9,'y':0,'w':0.3,'h':0.2})
 
 
+    def test_portrait_facecam_export(self):
+        import subprocess
+        import shutil
+        if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+            self.skipTest('FFmpeg not available')
+        source=Path(TEMP.name)/'test-source.mp4'
+        subprocess.run(['ffmpeg','-y','-nostdin','-loglevel','error','-f','lavfi','-i','testsrc2=size=320x180:rate=12',
+          '-f','lavfi','-i','anullsrc=r=44100:cl=mono','-t','1.3','-shortest','-c:v','libx264','-pix_fmt','yuv420p',
+          '-c:a','aac',str(source)],check=True,timeout=40)
+        main.execute('UPDATE videos SET path=? WHERE id=?',(str(source),self.video_id))
+        main.execute('UPDATE clips SET start=?,end=?,caption_style=?,facecam_mode=?,aspect_ratio=?,facecam_region=? WHERE id=?',
+          (0,1,'none','manual','9:16',json.dumps({'x':0.65,'y':0.05,'w':0.3,'h':0.42}),self.clip_id))
+        main.render_job(self.clip_id)
+        row=main.get_clip(self.clip_id)
+        self.assertEqual(row['status'],'exported','Check FFmpeg filtergraph compatibility')
+        result=json.loads(subprocess.check_output(['ffprobe','-v','error','-select_streams','v:0',
+            '-show_entries','stream=width,height','-of','json',row['path']]))
+        self.assertEqual((result['streams'][0]['width'],result['streams'][0]['height']),(540,960))
+
+
 if __name__ == '__main__':
     unittest.main()
