@@ -51,28 +51,14 @@ class TwitchCreatorTests(unittest.TestCase):
             main.twitch_watch_remove('123',None)
             self.assertEqual(main.twitch_watchlist(None),[])
 
-    def test_create_native_clip_requires_live_and_permission(self):
-        main.execute('INSERT INTO twitch_watchlist(broadcaster_id,login,display_name,added_at) VALUES(?,?,?,?)',
-            ('123','streamer','Streamer',main.utc()))
-        def fake(path,params=None,method='GET'):
-            if path=='/streams':return {'data':[{'user_id':'123'}]}
-            if path=='/clips' and method=='POST':
-                self.assertEqual(params['broadcaster_id'],'123')
-                self.assertEqual(params['duration'],30)
-                return {'data':[{'id':'Clip123','edit_url':'https://www.twitch.tv/streamer/clip/Clip123'}]}
-            raise AssertionError((path,method))
-        with patch.object(main,'twitch_helix',side_effect=fake):
-            result=main.create_twitch_clip(main.CreateTwitchClip(broadcaster_id='123'),None)
-        self.assertEqual(result['id'],'Clip123')
-        self.assertEqual(main.twitch_created_clips(None)[0]['id'],'Clip123')
-        with patch.object(main,'twitch_helix',return_value={'data':[]}):
+    def test_live_clip_creation_disabled_and_never_posts_to_twitch(self):
+        with patch.object(main,'twitch_helix') as twitch:
             with self.assertRaises(HTTPException) as cm:
                 main.create_twitch_clip(main.CreateTwitchClip(broadcaster_id='123'),None)
         self.assertEqual(cm.exception.status_code,409)
-        main.execute('UPDATE platform_accounts SET scopes=? WHERE platform=?',('','twitch'))
-        with self.assertRaises(HTTPException):
-            main.twitch_auth_headers(require_clip_scope=True)
-
+        self.assertIn('disabled',cm.exception.detail)
+        twitch.assert_not_called()
+        self.assertEqual(main.execute('SELECT COUNT(*) AS total FROM twitch_created_clips').fetchone()['total'],0)
 
     def test_created_clips_query_playable_metadata(self):
         main.execute('INSERT INTO twitch_created_clips(id,broadcaster_id,edit_url,created_at) VALUES(?,?,?,?)',
