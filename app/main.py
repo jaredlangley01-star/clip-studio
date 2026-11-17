@@ -56,6 +56,10 @@ def init():
         c.execute('CREATE TABLE IF NOT EXISTS font_library(id TEXT PRIMARY KEY,family TEXT NOT NULL,filename TEXT NOT NULL,created TEXT)')
         c.execute('CREATE TABLE IF NOT EXISTS caption_presets(id TEXT PRIMARY KEY,name TEXT NOT NULL,theme TEXT NOT NULL,created TEXT)')
         c.execute('CREATE TABLE IF NOT EXISTS platform_accounts(platform TEXT PRIMARY KEY,account_id TEXT NOT NULL,account_name TEXT NOT NULL,token_cipher TEXT NOT NULL,refresh_cipher TEXT,expires_at REAL,connected_at TEXT NOT NULL)')
+        cols_platform=[r[1] for r in c.execute('PRAGMA table_info(platform_accounts)')]
+        if 'scopes' not in cols_platform:c.execute("ALTER TABLE platform_accounts ADD COLUMN scopes TEXT DEFAULT ''")
+        c.execute('CREATE TABLE IF NOT EXISTS twitch_watchlist(broadcaster_id TEXT PRIMARY KEY,login TEXT NOT NULL,display_name TEXT NOT NULL,thumbnail TEXT,added_at TEXT NOT NULL)')
+        c.execute('CREATE TABLE IF NOT EXISTS twitch_created_clips(id TEXT PRIMARY KEY,broadcaster_id TEXT NOT NULL,edit_url TEXT,created_at TEXT NOT NULL)')
         c.execute('CREATE TABLE IF NOT EXISTS oauth_pending(state TEXT PRIMARY KEY,platform TEXT NOT NULL,expires_at REAL NOT NULL)')
         c.execute("CREATE TABLE IF NOT EXISTS ingest_items(platform TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT NOT NULL,item_type TEXT NOT NULL,source_url TEXT,published TEXT,thumbnail TEXT,status TEXT NOT NULL DEFAULT 'discovered',video_id TEXT,discovered TEXT NOT NULL,PRIMARY KEY(platform,external_id))")
 init()
@@ -373,9 +377,11 @@ def save_platform_account(platform,token,identity):
     if not isinstance(access,str) or not access:raise HTTPException(502,'Missing access token from provider')
     refresh=token.get('refresh_token')
     expires=time.time()+int(token.get('expires_in',3600))-90
-    execute('INSERT INTO platform_accounts(platform,account_id,account_name,token_cipher,refresh_cipher,expires_at,connected_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(platform) DO UPDATE SET account_id=excluded.account_id,account_name=excluded.account_name,token_cipher=excluded.token_cipher,refresh_cipher=excluded.refresh_cipher,expires_at=excluded.expires_at,connected_at=excluded.connected_at',
+    scopes=token.get('scope',[])
+    scopes=' '.join(scopes) if isinstance(scopes,list) else str(scopes or '')
+    execute('INSERT INTO platform_accounts(platform,account_id,account_name,token_cipher,refresh_cipher,expires_at,connected_at,scopes) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(platform) DO UPDATE SET account_id=excluded.account_id,account_name=excluded.account_name,token_cipher=excluded.token_cipher,refresh_cipher=excluded.refresh_cipher,expires_at=excluded.expires_at,connected_at=excluded.connected_at,scopes=excluded.scopes',
         (platform,str(identity['id']),str(identity['name'])[:120],f.encrypt(access.encode()).decode(),
-         f.encrypt(refresh.encode()).decode() if refresh else None,expires,utc()))
+         f.encrypt(refresh.encode()).decode() if refresh else None,expires,utc(),scopes))
 
 def platform_access(platform):
     row=execute('SELECT * FROM platform_accounts WHERE platform=?',(platform,)).fetchone()
@@ -410,7 +416,8 @@ def platform_status(_:None=Depends(auth)):
     accounts={r['platform']:r for r in execute('SELECT platform,account_name,account_id,connected_at FROM platform_accounts').fetchall()}
     return [{'platform':p,'configured':platform_ready(p),'connected':p in accounts,
          'account_name':accounts[p]['account_name'] if p in accounts else None,
-         'connected_at':accounts[p]['connected_at'] if p in accounts else None}
+         'connected_at':accounts[p]['connected_at'] if p in accounts else None,
+         'can_create_twitch_clips':bool(p=='twitch' and p in accounts and 'clips:edit' in (execute('SELECT scopes FROM platform_accounts WHERE platform=?',(p,)).fetchone()['scopes'] or '').split())}
          for p in ('youtube','twitch')]
 
 @app.get('/api/platforms/{platform}/connect')
@@ -429,7 +436,7 @@ def platform_connect(platform:str,_:None=Depends(auth)):
         url='https://accounts.google.com/o/oauth2/v2/auth?'+urlencode(params)
     else:
         params={'client_id':cid,'redirect_uri':redirect,'response_type':'code','state':state,
-                'scope':''}
+                'scope':'clips:edit'}
         url='https://id.twitch.tv/oauth2/authorize?'+urlencode(params)
     return {'authorization_url':url}
 
@@ -497,6 +504,115 @@ def scan_ingest(_:None=Depends(auth)):
 def list_ingest(_:None=Depends(auth)):
     rows=execute('SELECT platform,external_id,title,item_type,source_url,published,thumbnail,status,video_id,discovered FROM ingest_items ORDER BY discovered DESC LIMIT 200').fetchall()
     return [serialize(r) for r in rows]
+
+
+# Discover other Twitch broadcasters, watch them, and create Twitch-native clips.
+# No copying of source media, downloads, or cross-platform publishing occurs here.
+def twitch_auth_headers(require_clip_scope=False):
+    token,account=platform_access('twitch')
+    if require_clip_scope and 'clips:edit' not in (account['scopes'] or '').split():
+        raise HTTPException(409,'Reconnect Twitch in Platforms to authorize the clips:edit permission')
+    cid,_=platform_config('twitch')
+    return {'Authorization':'Bearer '+token,'Client-Id':cid}
+
+def twitch_helix(path,params=None,method='GET'):
+    if not path.startswith('/') or '://' in path or '?' in path:
+        raise HTTPException(400,'Invalid Twitch resource')
+    url='https://api.twitch.tv/helix'+path
+    if params:url+='?'+urlencode(params)
+    headers=twitch_auth_headers(require_clip_scope=(method=='POST'))
+    if method=='GET':return exchange_json(url,headers=headers)
+    if method!='POST':raise HTTPException(400,'Unsupported method')
+    req=urllib.request.Request(url,data=b'',headers={'Accept':'application/json','User-Agent':'ClipStudio/5.3',**headers},method='POST')
+    try:
+        with urllib.request.urlopen(req,timeout=25) as resp:return json.load(resp)
+    except urllib.error.HTTPError as e:
+        # Return actionable denial without leaking access tokens or response internals.
+        if e.code==403:raise HTTPException(403,'Broadcaster does not permit this clip, or your account does not meet their clipping restrictions') from e
+        if e.code==404:raise HTTPException(404,'Broadcaster is offline or unavailable for live clipping') from e
+        if e.code==401:raise HTTPException(401,'Twitch clips authorization expired; reconnect Twitch') from e
+        raise HTTPException(502,'Twitch clip API returned HTTP '+str(e.code)) from e
+
+@app.get('/api/twitch/search')
+def twitch_search(q:str,_:None=Depends(auth)):
+    q=q.strip()
+    if not 2<=len(q)<=80:raise HTTPException(400,'Enter a Twitch channel name (2–80 characters)')
+    result=twitch_helix('/search/channels',{'query':q,'first':15})
+    return [{'id':str(i['id']),'login':i.get('broadcaster_login',''),'name':i.get('display_name',''),
+            'live':bool(i.get('is_live')),'title':i.get('title',''),
+            'game':i.get('game_name',''),'thumbnail':i.get('thumbnail_url','')}
+            for i in result.get('data',[])]
+
+@app.get('/api/twitch/watchlist')
+def twitch_watchlist(_:None=Depends(auth)):
+    rows=execute('SELECT broadcaster_id,login,display_name,thumbnail,added_at FROM twitch_watchlist ORDER BY added_at DESC LIMIT 100').fetchall()
+    items=[serialize(r) for r in rows]
+    if not items:return []
+    # Resolve live status against official API, in one batched request.
+    try:
+        data=twitch_helix('/streams',[('user_id',i['broadcaster_id']) for i in items])
+        streams={str(v['user_id']):v for v in data.get('data',[])}
+    except HTTPException:
+        streams={}
+    for item in items:
+        live=streams.get(item['broadcaster_id'])
+        item['live']=bool(live)
+        item['title']=live.get('title','') if live else ''
+        item['viewers']=live.get('viewer_count') if live else None
+    return items
+
+class WatchChannel(BaseModel):
+    broadcaster_id:str=Field(min_length=1,max_length=30)
+
+@app.post('/api/twitch/watchlist')
+def twitch_watch_add(p:WatchChannel,_:None=Depends(auth)):
+    if not p.broadcaster_id.isdecimal():raise HTTPException(400,'Invalid broadcaster ID')
+    result=twitch_helix('/users',{'id':p.broadcaster_id})
+    items=result.get('data') or []
+    if not items:raise HTTPException(404,'Twitch broadcaster was not found')
+    user=items[0]
+    execute('INSERT INTO twitch_watchlist(broadcaster_id,login,display_name,thumbnail,added_at) VALUES(?,?,?,?,?) ON CONFLICT(broadcaster_id) DO UPDATE SET login=excluded.login,display_name=excluded.display_name,thumbnail=excluded.thumbnail',
+        (str(user['id']),user['login'],user['display_name'],user.get('profile_image_url',''),utc()))
+    return {'added':True,'id':str(user['id'])}
+
+@app.delete('/api/twitch/watchlist/{broadcaster_id}')
+def twitch_watch_remove(broadcaster_id:str,_:None=Depends(auth)):
+    execute('DELETE FROM twitch_watchlist WHERE broadcaster_id=?',(broadcaster_id,))
+    return {'removed':True}
+
+@app.get('/api/twitch/broadcasters/{broadcaster_id}/clips')
+def twitch_broadcaster_clips(broadcaster_id:str,_:None=Depends(auth)):
+    if not broadcaster_id.isdecimal():raise HTTPException(400,'Invalid broadcaster ID')
+    data=twitch_helix('/clips',{'broadcaster_id':broadcaster_id,'first':12})
+    return [{'id':v['id'],'title':v.get('title',''),'url':v.get('url',''),
+        'thumbnail':v.get('thumbnail_url',''),'views':v.get('view_count',0),
+        'created':v.get('created_at','')} for v in data.get('data',[])]
+
+class CreateTwitchClip(BaseModel):
+    broadcaster_id:str=Field(min_length=1,max_length=30)
+    duration:float=Field(default=30,ge=5,le=60)
+    title:str=Field(default='',max_length=100)
+
+@app.post('/api/twitch/clips')
+def create_twitch_clip(p:CreateTwitchClip,_:None=Depends(auth)):
+    if not p.broadcaster_id.isdecimal():raise HTTPException(400,'Invalid broadcaster ID')
+    if not execute('SELECT 1 FROM twitch_watchlist WHERE broadcaster_id=?',(p.broadcaster_id,)).fetchone():
+        raise HTTPException(404,'Add the broadcaster to your watchlist first')
+    live=twitch_helix('/streams',{'user_id':p.broadcaster_id,'first':1})
+    if not live.get('data'):raise HTTPException(409,'This broadcaster is not live; live clipping is unavailable')
+    params={'broadcaster_id':p.broadcaster_id,'duration':round(p.duration,1)}
+    if p.title.strip():params['title']=p.title.strip()
+    result=twitch_helix('/clips',params,method='POST')
+    clip=(result.get('data') or [None])[0]
+    if not clip or not clip.get('id'):raise HTTPException(502,'Twitch did not return a clip ID')
+    execute('INSERT OR REPLACE INTO twitch_created_clips(id,broadcaster_id,edit_url,created_at) VALUES(?,?,?,?)',
+        (str(clip['id']),p.broadcaster_id,str(clip.get('edit_url') or ''),utc()))
+    return {'id':clip['id'],'edit_url':clip.get('edit_url'),
+            'note':'Twitch creates a native clip. Open the Twitch edit URL to review/publish it; it is not imported into Clip Studio.'}
+
+@app.get('/api/twitch/created-clips')
+def twitch_created_clips(_:None=Depends(auth)):
+    return [serialize(x) for x in execute('SELECT id,broadcaster_id,edit_url,created_at FROM twitch_created_clips ORDER BY created_at DESC LIMIT 50').fetchall()]
 
 @app.get('/api/platforms/{platform}/videos')
 def platform_videos(platform:str,_:None=Depends(auth)):

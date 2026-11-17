@@ -1,3 +1,17 @@
+# Twitch-first Streamer Discovery and Native Clips
+
+Clip Studio now supports researching **other Twitch broadcasters** in the Platforms page. Search for a username, add a channel to your watchlist, refresh current live status, inspect existing public Twitch clips, and create a Twitch-native clip of a **currently live** watched broadcaster when the broadcaster's clip settings permit it.
+
+## One-time permission change
+
+The new Twitch Create Clip API requires the `clips:edit` user OAuth scope. On **Platforms → Twitch**, click **Reconnect Twitch** and approve the new permission. Your existing Twitch Client ID/Secret and OAuth Encryption Key in Render remain the same. A previous Twitch connection without this scope can browse streamers but cannot create native Twitch clips.
+
+Clip creation is an explicit user action; it is not an automatic service. Twitch decides whether a broadcaster permits clipping and can reject follower-only, subscriber-only, banned-user or disabled-clip requests. Twitch's `edit_url` is a time-limited Twitch clip editor link. Creating a native Twitch clip **does not** copy the video into Clip Studio and does not authorize arbitrary downloading or cross-platform redistribution. Custom Clip Studio subtitles, face-cam layouts, and MP4 export still require footage the user may lawfully process.
+
+The watchlist and created-clip history use the existing temporary SQLite database on Render Free; they are not durable across service storage resets. No continuous monitoring, downloading, scraping or auto-publishing is introduced. YouTube integration and editing workflow remain intact.
+
+---
+
 # Milestone 5.2 — Connected-channel Recording Inbox
 
 The Platforms page now has an **on-demand Recording Inbox** for connected YouTube and Twitch accounts. Use **Scan connected channels** to discover and deduplicate uploads and live-status records. Existing matched recordings keep their status when scanned again. The inbox is metadata only: the official APIs do **not** provide downloadable source recordings.
