@@ -26,3 +26,8 @@ jobs:
               assert token in h, token
           print('Milestone 2 source checks passed')
           PY
+
+      - name: Caption integration tests
+        run: |
+          pip install -r requirements.txt
+          python -m unittest discover -s tests -v
