@@ -16,7 +16,7 @@ class CaptionEditorTests(unittest.TestCase):
         self.video_id = main.uid()
         self.clip_id = main.uid()
         main.execute(
-            'INSERT INTO videos VALUES(?,?,?,?,?,?,?,?)',
+            'INSERT INTO videos(id,name,source,status,path,duration,error,created) VALUES(?,?,?,?,?,?,?,?)',
             (self.video_id, 'test.mp4', 'upload', 'ready', '/tmp/test.mp4', 60, None, main.utc()))
         main.execute(
             'INSERT INTO clips(id,video_id,title,start,end,score,status,path,created,caption_style,reason) '
