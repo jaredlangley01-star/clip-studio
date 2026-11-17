@@ -73,26 +73,33 @@ class CaptionEditorTests(unittest.TestCase):
         self.assertEqual(main.captions_for_clip(row), [])
         self.assertIsNone(main.subtitle_file(row))
 
-    def test_aspect_ratio_and_manual_camera(self):
-        p=main.ClipEdit(title='Test',start=10,end=20,caption_style='bold',
-                        aspect_ratio='9:16',facecam_mode='manual',
-                        facecam_region={'x':0.7,'y':0.1,'w':0.28,'h':0.33})
-        main.clip_edit(self.clip_id,p,None)
+    def test_upload_layout_shared_by_all_clips(self):
+        import asyncio
+        import io
+        from starlette.datastructures import UploadFile
+        file=UploadFile(file=io.BytesIO(b'not a real video'),filename='test.mp4')
+        result=asyncio.run(main.upload(file=file,highlight_count=4,clip_length=35,
+            aspect_ratio='9:16',has_facecam=True,
+            facecam_region=json.dumps({'x':0.70,'y':0.08,'w':0.28,'h':0.36}),_=None))
+        video=main.execute('SELECT * FROM videos WHERE id=?',(result['id'],)).fetchone()
+        self.assertEqual(video['aspect_ratio'],'9:16')
+        self.assertEqual(video['facecam_mode'],'manual')
+        self.assertEqual(json.loads(video['facecam_region'])['w'],0.28)
+        # Verify that repeated/generated highlights inherit the same video layout.
+        row=main.execute('SELECT * FROM videos WHERE id=?',(result['id'],)).fetchone()
+        self.assertEqual((row['aspect_ratio'],row['facecam_mode']),('9:16','manual'))
+
+    def test_clip_edit_keeps_upload_layout(self):
+        main.execute('UPDATE clips SET aspect_ratio=?,facecam_mode=?,facecam_region=? WHERE id=?',
+          ('9:16','manual',json.dumps({'x':0.7,'y':0.1,'w':0.28,'h':0.33}),self.clip_id))
+        main.clip_edit(self.clip_id,main.ClipEdit(title='new',start=10,end=20,caption_style='none'),None)
         row=main.get_clip(self.clip_id)
         self.assertEqual(row['aspect_ratio'],'9:16')
+        self.assertEqual(row['facecam_mode'],'manual')
         self.assertEqual(json.loads(row['facecam_region'])['w'],0.28)
-        p=main.ClipEdit(title='Test',start=10,end=20,caption_style='none',
-                        aspect_ratio='1:1',facecam_mode='off')
-        main.clip_edit(self.clip_id,p,None)
-        self.assertEqual(main.get_clip(self.clip_id)['aspect_ratio'],'1:1')
         from fastapi import HTTPException
         with self.assertRaises(HTTPException):
-            main.clip_edit(self.clip_id,main.ClipEdit(title='Test',start=10,end=20,
-              aspect_ratio='16:9',facecam_mode='manual',
-              facecam_region={'x':0.7,'y':0.1,'w':0.28,'h':0.33}),None)
-        with self.assertRaises(HTTPException):
             main.validate_region({'x':0.9,'y':0,'w':0.3,'h':0.2})
-
 
     def test_portrait_facecam_export(self):
         import subprocess
