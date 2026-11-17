@@ -1,8 +1,9 @@
+
 services:
   - type: web
     name: clip-studio
     runtime: docker
-    plan: starter
+    plan: free
     healthCheckPath: /health
     envVars:
       - key: APP_USERNAME
@@ -10,8 +11,8 @@ services:
       - key: APP_PASSWORD
         sync: false
       - key: DATA_DIR
-        value: /app/storage
-    disk:
-      name: clip-studio-storage
-      mountPath: /app/storage
-      sizeGB: 20
+        value: /tmp/clip-studio
+      - key: MAX_UPLOAD_GB
+        value: "0.1"
+      - key: ENABLE_LIVE_MONITOR
+        value: "false"
