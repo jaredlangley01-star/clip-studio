@@ -57,6 +57,7 @@ def init():
         c.execute('CREATE TABLE IF NOT EXISTS caption_presets(id TEXT PRIMARY KEY,name TEXT NOT NULL,theme TEXT NOT NULL,created TEXT)')
         c.execute('CREATE TABLE IF NOT EXISTS platform_accounts(platform TEXT PRIMARY KEY,account_id TEXT NOT NULL,account_name TEXT NOT NULL,token_cipher TEXT NOT NULL,refresh_cipher TEXT,expires_at REAL,connected_at TEXT NOT NULL)')
         c.execute('CREATE TABLE IF NOT EXISTS oauth_pending(state TEXT PRIMARY KEY,platform TEXT NOT NULL,expires_at REAL NOT NULL)')
+        c.execute("CREATE TABLE IF NOT EXISTS ingest_items(platform TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT NOT NULL,item_type TEXT NOT NULL,source_url TEXT,published TEXT,thumbnail TEXT,status TEXT NOT NULL DEFAULT 'discovered',video_id TEXT,discovered TEXT NOT NULL,PRIMARY KEY(platform,external_id))")
 init()
 
 def utc():return datetime.now(timezone.utc).isoformat()
@@ -463,6 +464,40 @@ def disconnect_platform(platform:str,_:None=Depends(auth)):
     execute('DELETE FROM platform_accounts WHERE platform=?',(platform,))
     return {'disconnected':True}
 
+
+# On-demand metadata discovery, not direct platform-media download or live capture.
+@app.post('/api/ingest/scan')
+def scan_ingest(_:None=Depends(auth)):
+    seen=0
+    failures={}
+    for platform in ('youtube','twitch'):
+        if not execute('SELECT 1 FROM platform_accounts WHERE platform=?',(platform,)).fetchone():continue
+        try:
+            response=platform_videos(platform,None)
+            for item in response['videos']:
+                external_id=str(item.get('id',''))
+                if not external_id or len(external_id)>160:continue
+                kind=item.get('type','recording')
+                if kind not in ('recording','live'):continue
+                execute("""INSERT INTO ingest_items(platform,external_id,title,item_type,source_url,published,thumbnail,status,discovered)
+                    VALUES(?,?,?,?,?,?,?,'discovered',?)
+                    ON CONFLICT(platform,external_id) DO UPDATE SET
+                    title=excluded.title,item_type=excluded.item_type,source_url=excluded.source_url,
+                    published=excluded.published,thumbnail=excluded.thumbnail""",
+                    (platform,external_id,str(item.get('title','Untitled'))[:250],kind,
+                     item.get('url'),item.get('published'),item.get('thumbnail'),utc()))
+                seen+=1
+        except HTTPException as exc:
+            failures[platform]='Platform returned HTTP '+str(exc.status_code)
+        except Exception:
+            failures[platform]='Platform could not be scanned'
+    return {'seen':seen,'errors':failures,'items':list_ingest(None)}
+
+@app.get('/api/ingest')
+def list_ingest(_:None=Depends(auth)):
+    rows=execute('SELECT platform,external_id,title,item_type,source_url,published,thumbnail,status,video_id,discovered FROM ingest_items ORDER BY discovered DESC LIMIT 200').fetchall()
+    return [serialize(r) for r in rows]
+
 @app.get('/api/platforms/{platform}/videos')
 def platform_videos(platform:str,_:None=Depends(auth)):
     token,account=platform_access(platform)
@@ -508,7 +543,7 @@ def transcript_data(vid:str,_:None=Depends(auth)):
     return {'transcript':json.loads(row['data']) if row['data'] else None,'provider':row['provider'],'error':row['error']}
 
 @app.post('/api/upload')
-async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_length:int=Form(35),aspect_ratio:str=Form('9:16'),has_facecam:bool=Form(False),facecam_region:str=Form(''),_:None=Depends(auth)):
+async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_length:int=Form(35),aspect_ratio:str=Form('9:16'),has_facecam:bool=Form(False),facecam_region:str=Form(''),platform_source:str=Form(''),platform_item_id:str=Form(''),_:None=Depends(auth)):
     if not 1<=highlight_count<=12 or not 10<=clip_length<=90:raise HTTPException(400,'Select 1–12 highlights and clip length 10–90 seconds')
     if aspect_ratio not in ('9:16','1:1','16:9'):raise HTTPException(400,'Choose a valid aspect ratio')
     if has_facecam and aspect_ratio!='9:16':raise HTTPException(400,'Facecam layout is currently supported only for 9:16')
@@ -517,6 +552,13 @@ async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_leng
         try:region=validate_region(json.loads(facecam_region))
         except (ValueError,TypeError,KeyError):raise HTTPException(400,'Choose and crop the facecam before uploading')
         if region is None:raise HTTPException(400,'Crop the facecam before uploading')
+    ingest_item=None
+    if platform_source or platform_item_id:
+        if platform_source not in ('youtube','twitch') or not platform_item_id:raise HTTPException(400,'Invalid linked platform source')
+        ingest_item=execute('SELECT * FROM ingest_items WHERE platform=? AND external_id=?',(platform_source,platform_item_id)).fetchone()
+        if not ingest_item or ingest_item['item_type']!='recording':raise HTTPException(404,'Recorded item not found in channel inbox')
+        if ingest_item['video_id']:raise HTTPException(409,'This recording already has an uploaded source file')
+        if not execute('SELECT 1 FROM platform_accounts WHERE platform=?',(platform_source,)).fetchone():raise HTTPException(409,'Reconnect this platform account')
     name=Path(file.filename or 'recording').name
     if Path(name).suffix.lower() not in ('.mp4','.mov','.mkv','.webm','.ts','.m4v'):
         raise HTTPException(400,'Please use MP4, MOV, MKV, WEBM, TS or M4V')
@@ -532,7 +574,14 @@ async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_leng
         if not total:raise HTTPException(400,'Empty file')
     except Exception:
         dest.unlink(missing_ok=True);raise
-    execute('INSERT INTO videos(id,name,source,status,path,duration,error,created,aspect_ratio,facecam_mode,facecam_region) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(vid,name,'upload','processing',str(dest),None,None,utc(),aspect_ratio,'manual' if has_facecam else 'off',json.dumps(region) if region else None))
+    execute('INSERT INTO videos(id,name,source,status,path,duration,error,created,aspect_ratio,facecam_mode,facecam_region) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(vid,name,platform_source or 'upload','processing',str(dest),None,None,utc(),aspect_ratio,'manual' if has_facecam else 'off',json.dumps(region) if region else None))
+    if ingest_item:
+        with lock:
+            with db() as c:
+                linked=c.execute("UPDATE ingest_items SET video_id=?,status='imported' WHERE platform=? AND external_id=? AND video_id IS NULL",(vid,platform_source,platform_item_id)).rowcount
+        if not linked:
+            execute('DELETE FROM videos WHERE id=?',(vid,));dest.unlink(missing_ok=True)
+            raise HTTPException(409,'This recording was linked by another upload')
     threading.Thread(target=process_video,args=(vid,highlight_count,clip_length),daemon=True).start()
     return {'id':vid,'status':'processing'}
 
