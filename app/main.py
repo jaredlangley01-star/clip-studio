@@ -185,12 +185,58 @@ def score_highlight(start,end,energy,transcript):
     title=(phrase[:57].rsplit(' ',1)[0] if len(phrase)>60 else phrase[:60]) or None
     return score,explanation,title
 
+
+def semantic_rerank(picks, transcript):
+    """Optional transcript-grounded semantic quality review via Groq chat completions.
+    Activated only with HIGHLIGHT_LLM_MODEL, avoiding surprise extra API requests."""
+    model=os.getenv('HIGHLIGHT_LLM_MODEL','').strip()
+    key=os.getenv('TRANSCRIPTION_API_KEY','').strip()
+    words=(transcript or {}).get('words') or []
+    if not model or not key or not words:return picks
+    requests=[]
+    for i,p in enumerate(picks[:24]):
+        excerpt=' '.join(str(v.get('word',v.get('text',''))) for v in words
+                  if p['start']<=float(v.get('start',-1))<p['end'])
+        requests.append({'id':i,'transcript':excerpt[:1100],'initial_score':p['rank']})
+    prompt=('Evaluate short-form clip potential USING ONLY the supplied transcript. '
+       'Score engaging standalone narrative, humor, reactions, clarity, and hooks; '
+       'do not invent visuals or claims. Return a JSON object with key "clips" containing '
+       'an array of objects with integer id, integer score 0..99, short reason <=100 chars, '
+       'and short title <=60 chars reflecting the actual transcript. No markdown.')
+    payload={'model':model,'messages':[{'role':'system','content':prompt},
+        {'role':'user','content':json.dumps(requests,ensure_ascii=False)}],
+        'temperature':0.1,'max_tokens':1600,'response_format':{'type':'json_object'}}
+    req=urllib.request.Request('https://api.groq.com/openai/v1/chat/completions',
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'Authorization':'Bearer '+key,'Content-Type':'application/json','User-Agent':'ClipStudio/4.0','Accept':'application/json'},
+        method='POST')
+    try:
+        with urllib.request.urlopen(req,timeout=40) as res:response=json.load(res)
+        body=response['choices'][0]['message']['content']
+        result=json.loads(body)
+        for item in result.get('clips',[]):
+            idx=item.get('id')
+            if not isinstance(idx,int) or idx<0 or idx>=len(requests):continue
+            try:value=int(item['score'])
+            except (KeyError,ValueError,TypeError):continue
+            p=picks[idx]
+            p['rank']=max(0,min(99,round(p['rank']*0.35+max(0,min(99,value))*0.65)))
+            reason=str(item.get('reason','')).strip()[:100]
+            if reason:p['reason']='AI transcript review: '+reason
+            title=str(item.get('title','')).strip()[:60]
+            if title and any(ch.isalpha() for ch in title):p['title']=title
+    except Exception as exc:
+        # API rate limits, unavailable chat model, or invalid JSON should never block upload.
+        print('Optional semantic rerank unavailable:',str(exc)[:200],flush=True)
+    return picks
+
 def build_ranked_picks(path,dur,count,span,transcript):
     original=hybrid_picks(path,dur,max(count*2,count),span,transcript)
     proposals=[]
     for a,b,raw,reason in original:
         score,explanation,title=score_highlight(a,b,raw,transcript)
         proposals.append({'start':a,'end':b,'rank':score,'reason':explanation,'title':title,'raw':raw})
+    proposals=semantic_rerank(proposals,transcript)
     proposals.sort(key=lambda v:(v['rank'],v['raw']),reverse=True)
     picks=[]
     for item in proposals:
@@ -260,7 +306,7 @@ def state(_:None=Depends(auth)):
 
 @app.get('/api/capabilities')
 def capabilities(_:None=Depends(auth)):
-    return {'transcription_enabled':bool(os.getenv('TRANSCRIPTION_API_KEY','').strip()),'live_enabled':os.getenv('ENABLE_LIVE_MONITOR','false').lower()=='true','version':'4.0'}
+    return {'transcription_enabled':bool(os.getenv('TRANSCRIPTION_API_KEY','').strip()),'live_enabled':os.getenv('ENABLE_LIVE_MONITOR','false').lower()=='true','semantic_ranking_enabled':bool(os.getenv('HIGHLIGHT_LLM_MODEL','').strip()),'version':'4.0'}
 
 @app.get('/api/videos/{vid}/transcript')
 def transcript_data(vid:str,_:None=Depends(auth)):
