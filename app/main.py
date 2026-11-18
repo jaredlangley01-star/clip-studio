@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 ROOT=Path(os.environ.get('DATA_DIR','/tmp/clip-studio')).resolve()
 ROOT.mkdir(parents=True,exist_ok=True)
-for name in ('uploads','clips','live','fonts'):(ROOT/name).mkdir(exist_ok=True)
+for name in ('uploads','clips','live','fonts','sermons'):(ROOT/name).mkdir(exist_ok=True)
 DB=ROOT/'database.sqlite3'
 app=FastAPI(title='Clip Studio',docs_url=None,redoc_url=None)
 security=HTTPBasic(auto_error=False)
@@ -38,6 +38,9 @@ def init():
         c.execute('CREATE TABLE IF NOT EXISTS clips(id TEXT PRIMARY KEY,video_id TEXT,title TEXT,start REAL,end REAL,score REAL,status TEXT,path TEXT,created TEXT, FOREIGN KEY(video_id) REFERENCES videos(id))')
         c.execute('CREATE TABLE IF NOT EXISTS monitors(id TEXT PRIMARY KEY,label TEXT,platform TEXT,source_url TEXT,status TEXT,error TEXT,created TEXT)')
         c.execute('CREATE TABLE IF NOT EXISTS transcripts(video_id TEXT PRIMARY KEY,data TEXT,provider TEXT,error TEXT)')
+        c.execute('CREATE TABLE IF NOT EXISTS sermon_videos(video_id TEXT PRIMARY KEY,youtube_id TEXT NOT NULL,title TEXT NOT NULL,created TEXT NOT NULL)')
+        c.execute('CREATE TABLE IF NOT EXISTS sermon_clips(clip_id TEXT PRIMARY KEY,crop_x REAL NOT NULL DEFAULT 0.5)')
+        c.execute('CREATE TABLE IF NOT EXISTS sermon_branding(id INTEGER PRIMARY KEY CHECK(id=1),logo_path TEXT,fade_in REAL NOT NULL DEFAULT 0.5,fade_out REAL NOT NULL DEFAULT 0.7,outro_seconds REAL NOT NULL DEFAULT 2.0)')
         video_cols=[r[1] for r in c.execute('PRAGMA table_info(videos)')]
         if 'aspect_ratio' not in video_cols:c.execute("ALTER TABLE videos ADD COLUMN aspect_ratio TEXT DEFAULT '9:16'")
         if 'facecam_mode' not in video_cols:c.execute("ALTER TABLE videos ADD COLUMN facecam_mode TEXT DEFAULT 'off'")
@@ -278,6 +281,57 @@ def clip_thumbnail(cid:str,_:None=Depends(auth)):
     path=ensure_thumbnail(cid)
     if not path:raise HTTPException(404,'Thumbnail not available')
     return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'private, max-age=180'})
+
+
+def sermon_picks(path,duration_seconds,transcript,span=60):
+    """Return exactly three distinct chronological excerpts for usable source recordings."""
+    if duration_seconds<9:raise ValueError('Sermon recording must be at least 9 seconds to generate three separate clips')
+    span=min(float(span),duration_seconds/3)
+    span=max(2.5,span)
+    candidates=build_ranked_picks(path,duration_seconds,12,span,transcript)
+    chosen=[]
+    for pick in candidates:
+        start=float(pick['start']);end=min(duration_seconds,start+span)
+        if end-start<2.0:continue
+        if any(max(0,min(end,p['end'])-max(start,p['start']))>0.1 for p in chosen):continue
+        chosen.append({**pick,'start':start,'end':end})
+        if len(chosen)==3:break
+    # Distributed fallback when audio/transcript cannot supply three distinct suggestions.
+    for partition in range(3):
+        if len(chosen)==3:break
+        start=duration_seconds*(partition+0.5)/3-span/2
+        start=max(0,min(duration_seconds-span,start))
+        if any(max(0,min(start+span,p['end'])-max(start,p['start']))>0.1 for p in chosen):continue
+        chosen.append({'start':start,'end':start+span,'rank':0,'raw':0,
+                       'title':'Sermon passage '+str(partition+1),
+                       'reason':'Distributed candidate; review manually before export'})
+    if len(chosen)!=3:
+        chosen=[{'start':duration_seconds*i/3,'end':duration_seconds*(i+1)/3,'rank':0,'raw':0,
+                 'title':'Sermon passage '+str(i+1),'reason':'Distributed candidate; review manually before export'} for i in range(3)]
+    return sorted(chosen,key=lambda p:p['start'])
+
+def process_sermon(vid):
+    row=execute('SELECT * FROM videos WHERE id=?',(vid,)).fetchone()
+    if not row:return
+    try:
+        d=duration(row['path'])
+        transcript,error=transcribe(Path(row['path']))
+        execute('INSERT OR REPLACE INTO transcripts(video_id,data,provider,error) VALUES(?,?,?,?)',
+                (vid,json.dumps(transcript) if transcript else None,'Whisper API' if transcript else 'audio-only',error))
+        suggestions=sermon_picks(Path(row['path']),d,transcript)
+        with lock:
+            with db() as c:
+                c.execute('UPDATE videos SET status=?,duration=?,error=NULL WHERE id=?',('ready',d,vid))
+                for i,p in enumerate(suggestions,1):
+                    cid=uid()
+                    # With no transcript, keep captions disabled: editor allows manual captions.
+                    c.execute("""INSERT INTO clips(id,video_id,title,start,end,score,status,path,created,caption_style,reason,aspect_ratio,facecam_mode,rank_score,rank_reason)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (cid,vid,(p['title'] or 'Sermon highlight')[:105],p['start'],p['end'],p.get('raw',0),
+                         'review',None,utc(),'bold' if transcript else 'none',p['reason'],'9:16','off',p['rank'],p['reason']))
+                    c.execute('INSERT INTO sermon_clips(clip_id,crop_x) VALUES(?,?)',(cid,0.5))
+    except Exception as exc:
+        execute('UPDATE videos SET status=?,error=? WHERE id=?',('failed',str(exc)[:450],vid))
 
 def process_video(vid, count=8, clip_length=35):
     row=execute('SELECT * FROM videos WHERE id=?',(vid,)).fetchone()
@@ -779,6 +833,104 @@ def transcript_data(vid:str,_:None=Depends(auth)):
     if not row:raise HTTPException(404,'Transcript unavailable')
     return {'transcript':json.loads(row['data']) if row['data'] else None,'provider':row['provider'],'error':row['error']}
 
+
+# Sermons have their own fixed 3-clip, center-cropped 9:16 workflow.
+@app.get('/api/sermons/youtube')
+def sermon_youtube_catalog(_:None=Depends(auth)):
+    result=platform_videos('youtube',None)
+    return {'videos':[v for v in result['videos'] if v.get('type')=='recording'],
+            'note':'YouTube provides metadata only. Upload your original authorized sermon file to process it.'}
+
+@app.get('/api/sermons')
+def sermon_listing(_:None=Depends(auth)):
+    videos=execute("""SELECT s.video_id,s.youtube_id,s.title,s.created,v.duration,v.status,v.error
+        FROM sermon_videos s JOIN videos v ON s.video_id=v.id ORDER BY s.created DESC""").fetchall()
+    clips=execute("""SELECT sc.clip_id,sc.crop_x,c.video_id,c.title,c.status,c.start,c.end,c.rank_score
+        FROM sermon_clips sc JOIN clips c ON c.id=sc.clip_id ORDER BY c.created DESC""").fetchall()
+    return {'videos':[serialize(r) for r in videos],'clips':[serialize(r) for r in clips]}
+
+def sermon_branding_record():
+    row=execute('SELECT logo_path,fade_in,fade_out,outro_seconds FROM sermon_branding WHERE id=1').fetchone()
+    return serialize(row) if row else {'logo_path':None,'fade_in':0.5,'fade_out':0.7,'outro_seconds':2.0}
+
+@app.get('/api/sermons/branding')
+def sermon_branding_get(_:None=Depends(auth)):
+    config=sermon_branding_record()
+    return {'has_logo':bool(config['logo_path'] and Path(config['logo_path']).exists()),
+            'fade_in':config['fade_in'],'fade_out':config['fade_out'],'outro_seconds':config['outro_seconds']}
+
+@app.post('/api/sermons/branding')
+async def sermon_branding_save(fade_in:float=Form(0.5),fade_out:float=Form(0.7),
+                              outro_seconds:float=Form(2.0),logo:UploadFile|None=File(None),
+                              _:None=Depends(auth)):
+    for value,limit in ((fade_in,3),(fade_out,3),(outro_seconds,8)):
+        if not math.isfinite(value) or value<0 or value>limit:raise HTTPException(400,'Invalid fade/outro duration')
+    if outro_seconds and outro_seconds<0.5:raise HTTPException(400,'Outro must be at least 0.5 seconds')
+    current=sermon_branding_record()
+    path=current['logo_path']
+    if logo and logo.filename:
+        ext=Path(logo.filename).suffix.lower()
+        if ext not in ('.png','.jpg','.jpeg'):raise HTTPException(400,'Upload a PNG or JPEG church logo')
+        data=await logo.read(2*1024*1024+1)
+        if not data or len(data)>2*1024*1024:raise HTTPException(413,'Church logo must be under 2 MB')
+        dest=ROOT/'sermons'/('church-logo'+ext)
+        dest.write_bytes(data)
+        try:
+            info=json.loads(cmd(['ffprobe','-v','quiet','-select_streams','v:0','-show_entries','stream=codec_type,width,height','-of','json',str(dest)],timeout=15).stdout)
+            stream=(info.get('streams') or [None])[0]
+            if not stream or stream.get('codec_type')!='video' or not 1<=int(stream.get('width',0))<=6000 or not 1<=int(stream.get('height',0))<=6000:
+                raise ValueError('Unrecognized image')
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(400,'Logo could not be decoded as a supported image')
+        path=str(dest)
+    execute("""INSERT INTO sermon_branding(id,logo_path,fade_in,fade_out,outro_seconds)
+        VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET logo_path=excluded.logo_path,
+        fade_in=excluded.fade_in,fade_out=excluded.fade_out,outro_seconds=excluded.outro_seconds""",
+        (path,fade_in,fade_out,outro_seconds))
+    return sermon_branding_get(None)
+
+@app.post('/api/sermons/upload')
+async def sermon_upload(file:UploadFile=File(...),youtube_id:str=Form(...),_:None=Depends(auth)):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{11}',youtube_id):raise HTTPException(400,'Choose a YouTube sermon')
+    # Only allow recordings visible on the user's connected YouTube channel.
+    catalog=sermon_youtube_catalog(None)['videos']
+    selected=next((v for v in catalog if v['id']==youtube_id),None)
+    if not selected:raise HTTPException(403,'Sermon must appear on your connected YouTube channel')
+    filename=Path(file.filename or 'sermon.mp4').name
+    suffix=Path(filename).suffix.lower()
+    if suffix not in ('.mp4','.mov','.mkv','.webm','.m4v'):raise HTTPException(400,'Upload a sermon MP4, MOV, MKV, WEBM or M4V')
+    vid=uid();path=ROOT/'uploads'/(vid+suffix)
+    maxsize=int(float(os.getenv('MAX_UPLOAD_GB','2'))*1024**3)
+    size=0
+    try:
+        with path.open('wb') as dest:
+            while chunk:=await file.read(1024*1024):
+                size+=len(chunk)
+                if size>maxsize:raise HTTPException(413,'Recording exceeds the hosted upload limit')
+                dest.write(chunk)
+        if not size:raise HTTPException(400,'Empty recording')
+    except Exception:
+        path.unlink(missing_ok=True);raise
+    execute("""INSERT INTO videos(id,name,source,status,path,duration,error,created,aspect_ratio,facecam_mode)
+        VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (vid,filename,'sermon','processing',str(path),None,None,utc(),'9:16','off'))
+    execute('INSERT INTO sermon_videos(video_id,youtube_id,title,created) VALUES(?,?,?,?)',
+        (vid,youtube_id,selected['title'][:250],utc()))
+    threading.Thread(target=process_sermon,args=(vid,),daemon=True).start()
+    return {'id':vid,'status':'processing','target_clips':3}
+
+class SermonCropChange(BaseModel):
+    crop_x:float=Field(ge=0,le=1)
+
+@app.patch('/api/sermons/clips/{cid}/crop')
+def sermon_crop_change(cid:str,p:SermonCropChange,_:None=Depends(auth)):
+    row=execute("""SELECT c.status FROM sermon_clips sc JOIN clips c ON c.id=sc.clip_id WHERE sc.clip_id=?""",(cid,)).fetchone()
+    if not row:raise HTTPException(404,'Sermon clip not found')
+    if row['status'] not in ('review','render_failed'):raise HTTPException(409,'Cannot change crop after export approval')
+    execute('UPDATE sermon_clips SET crop_x=? WHERE clip_id=?',(round(p.crop_x,4),cid))
+    return {'clip_id':cid,'crop_x':round(p.crop_x,4)}
+
 @app.post('/api/upload')
 async def upload(file:UploadFile=File(...),highlight_count:int=Form(8),clip_length:int=Form(35),aspect_ratio:str=Form('9:16'),has_facecam:bool=Form(False),facecam_region:str=Form(''),platform_source:str=Form(''),platform_item_id:str=Form(''),_:None=Depends(auth)):
     if not 1<=highlight_count<=12 or not 10<=clip_length<=180:raise HTTPException(400,'Select 1–12 highlights and clip length 10–180 seconds')
@@ -1127,11 +1279,25 @@ def render_job(cid):
     clip=get_clip(cid); video=execute('SELECT path FROM videos WHERE id=?',(clip['video_id'],)).fetchone()
     output=ROOT/'clips'/(cid+'.mp4');tmp=ROOT/'clips'/(cid+'.partial.mp4')
     try:
+        sermon=execute('SELECT crop_x FROM sermon_clips WHERE clip_id=?',(cid,)).fetchone()
+        brand=sermon_branding_record() if sermon else None
+        seconds=float(clip['end'])-float(clip['start'])
+        fade_in=min(brand['fade_in'],seconds/3) if brand else 0
+        fade_out=min(brand['fade_out'],seconds/3) if brand else 0
+        outro=float(brand['outro_seconds']) if brand and brand['logo_path'] and Path(brand['logo_path']).exists() else 0
         ratio=clip['aspect_ratio'] or '9:16'
         if ratio not in ('9:16','1:1','16:9'):raise ValueError('Unknown aspect ratio')
         width,height={'9:16':(540,960),'1:1':(720,720),'16:9':(960,540)}[ratio]
         region=json.loads(clip['facecam_region']) if clip['facecam_region'] else None
-        if ratio=='9:16' and clip['facecam_mode']!='off':
+        if sermon:
+            # Full-bleed 9:16 crop: no letterboxing, blurred margins or stretch.
+            # The operator can reposition the center horizontally from the Sermons tab.
+            x=round(float(sermon['crop_x']),4)
+            filtergraph=(f"[0:v]trim=duration={seconds},setpts=PTS-STARTPTS,"
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height}:(in_w-out_w)*{x}:(in_h-out_h)/2,"
+                "setsar=1,format=yuv420p[v]")
+        elif ratio=='9:16' and clip['facecam_mode']!='off':
             region=validate_region(region)
             if not region:raise ValueError('Facecam region missing')
             config=validate_layout(json.loads(clip['layout']) if clip['layout'] else {},clip)
@@ -1164,7 +1330,38 @@ def render_job(cid):
             style=f"FontName={fontfamily},FontSize={theme['font_size']},PrimaryColour={ass_color(theme['color'],theme['opacity'])},OutlineColour={ass_color(theme['stroke_color'],theme['opacity'])},Bold={1 if clip['caption_style']=='bold' else 0},Outline={theme['stroke_width']},Shadow=0,BorderStyle=1,Alignment=2,MarginV={margin}"
             filtergraph+=f";[v]subtitles=filename='{escaped}':fontsdir='{str(ROOT/'fonts')}':force_style='{style}'[outv]"
         video_map='[outv]' if subs else '[v]'
-        cmd(['ffmpeg','-y','-nostdin','-v','error','-ss',str(clip['start']),'-i',video['path'],'-t',str(clip['end']-clip['start']),'-filter_complex',filtergraph,'-map',video_map,'-map','0:a:0?','-c:v','libx264','-preset','veryfast','-crf','24','-r','30','-c:a','aac','-b:a','128k','-movflags','+faststart',str(tmp)],timeout=900)
+        args=['ffmpeg','-y','-nostdin','-v','error','-ss',str(clip['start']),'-i',video['path']]
+        audio_fade=[]
+        render_length=seconds
+        if sermon:
+            src_label='outv' if subs else 'v'
+            stages=[]
+            if fade_in>0:stages.append(f"fade=t=in:st=0:d={fade_in}")
+            if fade_out>0:stages.append(f"fade=t=out:st={max(0,seconds-fade_out)}:d={fade_out}")
+            if outro>0:
+                # Hold the faded-to-black frame for the logo card, then cover
+                # it with black before overlaying the transparent PNG/JPEG logo.
+                stages += [f"tpad=stop_mode=clone:stop_duration={outro}",
+                           f"drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='gte(t,{seconds})'"]
+            stages.append('format=yuv420p')
+            filtergraph+=f";[{src_label}]"+','.join(stages)+"[sermon_base]"
+            video_map='[sermon_base]'
+            if outro>0:
+                args+=['-loop','1','-framerate','30','-i',brand['logo_path']]
+                # Maintain the logo's aspect ratio inside the portrait card.
+                filtergraph+=(f";[1:v]scale={int(width*.62)}:{int(height*.45)}:force_original_aspect_ratio=decrease,"
+                              "format=rgba[church_logo];"
+                              f"[sermon_base][church_logo]overlay=(W-w)/2:(H-h)/2:enable='gte(t,{seconds})':"
+                              "shortest=0:repeatlast=1[sermon_final]")
+                video_map='[sermon_final]'
+            if fade_in>0:audio_fade.append(f'afade=t=in:st=0:d={fade_in}')
+            if fade_out>0:audio_fade.append(f'afade=t=out:st={max(0,seconds-fade_out)}:d={fade_out}')
+            if outro>0:audio_fade.append(f'apad=pad_dur={outro}')
+            render_length=seconds+outro
+        args+=['-t',str(render_length),'-filter_complex',filtergraph,'-map',video_map,'-map','0:a:0?']
+        if audio_fade:args+=['-af',','.join(audio_fade)]
+        args+=['-c:v','libx264','-preset','veryfast','-crf','24','-r','30','-c:a','aac','-b:a','128k','-movflags','+faststart',str(tmp)]
+        cmd(args,timeout=900)
         os.replace(tmp,output)
         execute('UPDATE clips SET path=?,status=? WHERE id=?',(str(output),'exported',cid))
     except Exception as exc:
