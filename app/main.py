@@ -1279,11 +1279,25 @@ def render_job(cid):
     clip=get_clip(cid); video=execute('SELECT path FROM videos WHERE id=?',(clip['video_id'],)).fetchone()
     output=ROOT/'clips'/(cid+'.mp4');tmp=ROOT/'clips'/(cid+'.partial.mp4')
     try:
+        sermon=execute('SELECT crop_x FROM sermon_clips WHERE clip_id=?',(cid,)).fetchone()
+        brand=sermon_branding_record() if sermon else None
+        seconds=float(clip['end'])-float(clip['start'])
+        fade_in=min(brand['fade_in'],seconds/3) if brand else 0
+        fade_out=min(brand['fade_out'],seconds/3) if brand else 0
+        outro=float(brand['outro_seconds']) if brand and brand['logo_path'] and Path(brand['logo_path']).exists() else 0
         ratio=clip['aspect_ratio'] or '9:16'
         if ratio not in ('9:16','1:1','16:9'):raise ValueError('Unknown aspect ratio')
         width,height={'9:16':(540,960),'1:1':(720,720),'16:9':(960,540)}[ratio]
         region=json.loads(clip['facecam_region']) if clip['facecam_region'] else None
-        if ratio=='9:16' and clip['facecam_mode']!='off':
+        if sermon:
+            # Full-bleed 9:16 crop: no letterboxing, blurred margins or stretch.
+            # The operator can reposition the center horizontally from the Sermons tab.
+            x=round(float(sermon['crop_x']),4)
+            filtergraph=(f"[0:v]trim=duration={seconds},setpts=PTS-STARTPTS,"
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height}:(in_w-out_w)*{x}:(in_h-out_h)/2,"
+                "setsar=1,format=yuv420p[v]")
+        elif ratio=='9:16' and clip['facecam_mode']!='off':
             region=validate_region(region)
             if not region:raise ValueError('Facecam region missing')
             config=validate_layout(json.loads(clip['layout']) if clip['layout'] else {},clip)
@@ -1316,7 +1330,38 @@ def render_job(cid):
             style=f"FontName={fontfamily},FontSize={theme['font_size']},PrimaryColour={ass_color(theme['color'],theme['opacity'])},OutlineColour={ass_color(theme['stroke_color'],theme['opacity'])},Bold={1 if clip['caption_style']=='bold' else 0},Outline={theme['stroke_width']},Shadow=0,BorderStyle=1,Alignment=2,MarginV={margin}"
             filtergraph+=f";[v]subtitles=filename='{escaped}':fontsdir='{str(ROOT/'fonts')}':force_style='{style}'[outv]"
         video_map='[outv]' if subs else '[v]'
-        cmd(['ffmpeg','-y','-nostdin','-v','error','-ss',str(clip['start']),'-i',video['path'],'-t',str(clip['end']-clip['start']),'-filter_complex',filtergraph,'-map',video_map,'-map','0:a:0?','-c:v','libx264','-preset','veryfast','-crf','24','-r','30','-c:a','aac','-b:a','128k','-movflags','+faststart',str(tmp)],timeout=900)
+        args=['ffmpeg','-y','-nostdin','-v','error','-ss',str(clip['start']),'-i',video['path']]
+        audio_fade=[]
+        render_length=seconds
+        if sermon:
+            src_label='outv' if subs else 'v'
+            stages=[]
+            if fade_in>0:stages.append(f"fade=t=in:st=0:d={fade_in}")
+            if fade_out>0:stages.append(f"fade=t=out:st={max(0,seconds-fade_out)}:d={fade_out}")
+            if outro>0:
+                # Hold the faded-to-black frame for the logo card, then cover
+                # it with black before overlaying the transparent PNG/JPEG logo.
+                stages += [f"tpad=stop_mode=clone:stop_duration={outro}",
+                           f"drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='gte(t,{seconds})'"]
+            stages.append('format=yuv420p')
+            filtergraph+=f";[{src_label}]"+','.join(stages)+"[sermon_base]"
+            video_map='[sermon_base]'
+            if outro>0:
+                args+=['-loop','1','-framerate','30','-i',brand['logo_path']]
+                # Maintain the logo's aspect ratio inside the portrait card.
+                filtergraph+=(f";[1:v]scale={int(width*.62)}:{int(height*.45)}:force_original_aspect_ratio=decrease,"
+                              "format=rgba[church_logo];"
+                              f"[sermon_base][church_logo]overlay=(W-w)/2:(H-h)/2:enable='gte(t,{seconds})':"
+                              "shortest=0:repeatlast=1[sermon_final]")
+                video_map='[sermon_final]'
+            if fade_in>0:audio_fade.append(f'afade=t=in:st=0:d={fade_in}')
+            if fade_out>0:audio_fade.append(f'afade=t=out:st={max(0,seconds-fade_out)}:d={fade_out}')
+            if outro>0:audio_fade.append(f'apad=pad_dur={outro}')
+            render_length=seconds+outro
+        args+=['-t',str(render_length),'-filter_complex',filtergraph,'-map',video_map,'-map','0:a:0?']
+        if audio_fade:args+=['-af',','.join(audio_fade)]
+        args+=['-c:v','libx264','-preset','veryfast','-crf','24','-r','30','-c:a','aac','-b:a','128k','-movflags','+faststart',str(tmp)]
+        cmd(args,timeout=900)
         os.replace(tmp,output)
         execute('UPDATE clips SET path=?,status=? WHERE id=?',(str(output),'exported',cid))
     except Exception as exc:
