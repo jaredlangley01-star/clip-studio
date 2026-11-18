@@ -12,6 +12,6 @@ services:
       - key: DATA_DIR
         value: /tmp/clip-studio
       - key: MAX_UPLOAD_GB
-        value: "0.1"
+        value: "0.5"
       - key: ENABLE_LIVE_MONITOR
         value: "false"
