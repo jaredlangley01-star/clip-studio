@@ -907,7 +907,7 @@ async def sermon_upload(file:UploadFile=File(...),youtube_id:str=Form(...),_:Non
         with path.open('wb') as dest:
             while chunk:=await file.read(1024*1024):
                 size+=len(chunk)
-                if size>maxsize:raise HTTPException(413,'Recording exceeds the hosted upload limit')
+                if size>maxsize:raise HTTPException(413,f'Recording exceeds the configured {maxsize/1024**2:.0f} MiB upload limit. Increase MAX_UPLOAD_GB in Render Environment, save, and redeploy.')
                 dest.write(chunk)
         if not size:raise HTTPException(400,'Empty recording')
     except Exception:
